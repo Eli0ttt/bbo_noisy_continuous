@@ -1,0 +1,108 @@
+# RSI-Exam BBO common DSH configuration.
+#
+# This file deliberately keeps the official headless workflow and exposes only
+# the ordinary filesystem/shell tools. The dynamic-Cordis treatment adds its
+# two rows in bbo-cordis-extra.yml; nothing else differs between treatments.
+
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-flash-s1
+
+- id: tools
+  config:
+    mode: native
+
+- id: session-title
+  disabled: true
+
+- id: session-title-llm
+  disabled: true
+
+- id: session-telemetry-otel
+  disabled: true
+
+- id: user-questions
+  disabled: true
+
+- id: tool-bash
+  config:
+    enableRunInBackground: false
+
+- id: tool-pwsh
+  disabled: true
+
+- id: tool-jobs
+  disabled: true
+
+- id: tool-str-replace-editor
+  disabled: true
+
+- id: skill
+  disabled: true
+
+- id: skill-filesystem
+  disabled: true
+
+- id: tool-skill
+  disabled: true
+
+- id: goal
+  disabled: true
+
+- id: goal-round-driver
+  disabled: true
+
+- id: command-goal
+  disabled: true
+
+- id: plan-mode
+  disabled: true
+
+- id: subagent
+  disabled: true
+
+- id: subagent-spawn-in-process
+  disabled: true
+
+- id: subagent-fork-in-process
+  disabled: true
+
+- id: tool-subagent-control
+  disabled: true
+
+- id: tool-subagent-list-agents
+  disabled: true
+
+- id: tool-subagent
+  disabled: true
+
+- id: tool-subagent-fork
+  disabled: true
+
+- id: workflow-worker-thread
+  disabled: true
+
+- id: tool-workflow
+  disabled: true
+
+- id: tool-todo
+  disabled: true
+
+- id: tool-goal
+  disabled: true
+
+- id: tool-ralph
+  disabled: true
+
+- id: web
+  disabled: true
+
+- id: web-search-deepseek
+  disabled: true
+
+- id: web-fetch-http
+  disabled: true
+
+- id: tool-web
+  disabled: true

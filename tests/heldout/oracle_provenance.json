@@ -1,0 +1,14 @@
+{
+  "harness_sha256": "17f8c08e6d7484ff7b7bf9a85875fbe64da1301e65385f402cf66aee5bc8136e",
+  "hidden_data_sha256": "877a6824aaa5f492d51031e6bc312d68cbc959f7e532cdda7ba326ba89cfdb9d",
+  "oracle_kind": "exact",
+  "oracle_values_sha256": "88a7a23485bfefe05d830d75e331af19e1bde36d2af466e398d7ea6b72f39442",
+  "proof": {
+    "attainability": "each target was generated at one discarded in-bounds witness",
+    "construction": "nonnegative weighted squared random-feature mismatch",
+    "optimizer_observations": "deterministic pseudo-noisy",
+    "scorer_observations": "latent"
+  },
+  "schema_version": 1,
+  "task_id": "bbo_noisy_continuous_v1"
+}

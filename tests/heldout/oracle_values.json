@@ -1,0 +1,38 @@
+{
+  "objective_direction": "min",
+  "oracle_kind": "exact",
+  "per_instance_objective": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "proof": {
+    "attainability": "each target was generated at one discarded in-bounds witness",
+    "construction": "nonnegative weighted squared random-feature mismatch",
+    "optimizer_observations": "deterministic pseudo-noisy",
+    "scorer_observations": "latent"
+  },
+  "schema_version": 1,
+  "scoring": {
+    "anytime_weight": 0.7,
+    "final_weight": 0.3
+  },
+  "task_id": "bbo_noisy_continuous_v1"
+}

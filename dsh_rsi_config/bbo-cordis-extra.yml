@@ -1,0 +1,6 @@
+# Dynamic-Cordis treatment: the only capability delta from bbo-no-cordis.yml.
+- insert:
+    - id: cordis-host-runner
+      name: '@deepseek-ai/dsh-cordis-host-runner'
+    - id: tool-cordis
+      name: '@deepseek-ai/dsh-tool-cordis'
