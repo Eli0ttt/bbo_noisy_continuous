@@ -218,8 +218,10 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
     bash_nonzero_calls = 0
     bash_nonzero_exit_codes: collections.Counter[str] = collections.Counter()
     checkpoint_evaluate_calls = 0
-    checkpoint_decide_calls = 0
-    checkpoint_restore_calls = 0
+    checkpoint_keep_calls = 0
+    checkpoint_revert_calls = 0
+    checkpoint_checkout_calls = 0
+    checkpoint_finalize_calls = 0
     action_rows: list[dict[str, Any]] = []
 
     for index, call_id in enumerate(ordered_ids, start=1):
@@ -256,11 +258,29 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
         )
         if is_checkpoint_evaluate:
             checkpoint_evaluate_calls += 1
-        if name == "bash" and "version_checkpoint.py" in command_text and re.search(r"(?:^|\s)decide(?:\s|$)", command_text):
-            checkpoint_decide_calls += 1
-        if name == "bash" and "version_checkpoint.py" in command_text and re.search(r"(?:^|\s)restore(?:\s|$)", command_text):
-            checkpoint_restore_calls += 1
-        is_selfcheck = name == "bash" and ("selfcheck" in rendered_args or is_checkpoint_evaluate)
+        if name == "bash" and "version_checkpoint.py" in command_text and re.search(r"(?:^|\s)keep(?:\s|$)", command_text):
+            checkpoint_keep_calls += 1
+        if name == "bash" and "version_checkpoint.py" in command_text and re.search(r"(?:^|\s)revert(?:\s|$)", command_text):
+            checkpoint_revert_calls += 1
+        if name == "bash" and "version_checkpoint.py" in command_text and re.search(r"(?:^|\s)checkout(?:\s|$)", command_text):
+            checkpoint_checkout_calls += 1
+        if name == "bash" and "version_checkpoint.py" in command_text and re.search(r"(?:^|\s)finalize(?:\s|$)", command_text):
+            checkpoint_finalize_calls += 1
+
+        # A blocked transactional `evaluate` can exit before official
+        # selfcheck starts. Count it as a selfcheck execution only when the
+        # helper emitted its explicit start marker. Bare selfcheck commands are
+        # still counted directly.
+        checkpoint_selfcheck_started = (
+            is_checkpoint_evaluate
+            and "VERSION_SELFCHECK_START version=" in result_text
+        )
+        direct_selfcheck = (
+            name == "bash"
+            and "selfcheck" in rendered_args
+            and "version_checkpoint.py" not in command_text
+        )
+        is_selfcheck = direct_selfcheck or checkpoint_selfcheck_started
         score_payloads: list[dict[str, Any]] = []
         if is_selfcheck:
             selfcheck_tool_calls += 1
@@ -325,8 +345,10 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
         "bash_nonzero_calls": bash_nonzero_calls,
         "bash_nonzero_exit_codes": dict(sorted(bash_nonzero_exit_codes.items())),
         "checkpoint_evaluate_calls": checkpoint_evaluate_calls,
-        "checkpoint_decide_calls": checkpoint_decide_calls,
-        "checkpoint_restore_calls": checkpoint_restore_calls,
+        "checkpoint_keep_calls": checkpoint_keep_calls,
+        "checkpoint_revert_calls": checkpoint_revert_calls,
+        "checkpoint_checkout_calls": checkpoint_checkout_calls,
+        "checkpoint_finalize_calls": checkpoint_finalize_calls,
         "selfcheck_tool_calls": selfcheck_tool_calls,
         "scored_selfcheck_executions": scored_selfcheck_executions,
         "failed_selfcheck_tool_calls": selfcheck_failed_tool_calls,
@@ -482,12 +504,8 @@ def compute_bookkeeping(
     logged_versions = [row["version"] for row in versions]
     logged_candidate_versions = [v for v in logged_versions if v != "v0"]
     candidate_snapshot_versions = [v for v in valid_snapshot_versions if v != "v0"]
-    missing = [
-        v for v in logged_candidate_versions if v not in candidate_snapshot_versions
-    ]
-    extra = [
-        v for v in candidate_snapshot_versions if v not in logged_candidate_versions
-    ]
+    missing = [v for v in logged_candidate_versions if v not in candidate_snapshot_versions]
+    extra = [v for v in candidate_snapshot_versions if v not in logged_candidate_versions]
 
     manifest_versions: list[str] = []
     manifest_candidate_versions: list[str] = []
@@ -495,10 +513,16 @@ def compute_bookkeeping(
     extra_manifest_versions: list[str] = []
     snapshot_hash_mismatches: list[str] = []
     undecided_versions: list[str] = []
+    missing_parent_versions: list[str] = []
     final_solver_sha256: str | None = None
     matching_final_versions: list[str] = []
     submitted_versions: list[str] = []
     submitted_matches_final = False
+    canonical_version: str | None = None
+    pending_version: str | None = None
+    finalized = False
+    final_version: str | None = None
+
     checkpoint_guard_present = isinstance(checkpoint_state, dict) and isinstance(
         checkpoint_state.get("versions"), dict
     )
@@ -515,26 +539,45 @@ def compute_bookkeeping(
         extra_manifest_versions = [
             v for v in manifest_candidate_versions if v not in logged_candidate_versions
         ]
+        canonical_version = checkpoint_state.get("canonical_version")
+        pending_version = checkpoint_state.get("pending_version")
+        finalized = bool(checkpoint_state.get("finalized"))
+        final_version = checkpoint_state.get("final_version")
+
         for version in manifest_versions:
             row = manifest_map.get(version) or {}
             solver = versions_dir / version / "solver.py"
             expected = row.get("solver_sha256")
             if expected and solver.is_file() and sha256_file(solver) != expected:
                 snapshot_hash_mismatches.append(version)
-            if version != "v0" and row.get("status") in {"evaluating", "evaluated"}:
+            if version != "v0" and row.get("status") in {
+                "evaluating",
+                "evaluated",
+                "selfcheck_failed",
+            }:
                 undecided_versions.append(version)
+            if version != "v0":
+                parent = row.get("parent")
+                if not isinstance(parent, str) or parent not in manifest_map:
+                    missing_parent_versions.append(version)
+
         if final_solver is not None and final_solver.is_file():
             final_solver_sha256 = sha256_file(final_solver)
             matching_final_versions = [
-                v for v in manifest_versions
+                v
+                for v in manifest_versions
                 if manifest_map.get(v, {}).get("solver_sha256") == final_solver_sha256
             ]
+
         submitted_versions = [
-            v for v in manifest_versions
+            v
+            for v in manifest_versions
             if manifest_map.get(v, {}).get("status") == "submitted"
         ]
         submitted_matches_final = (
-            len(submitted_versions) == 1 and submitted_versions[0] in matching_final_versions
+            len(submitted_versions) == 1
+            and submitted_versions[0] in matching_final_versions
+            and final_version == submitted_versions[0]
         )
 
     snapshot_complete = (
@@ -542,16 +585,55 @@ def compute_bookkeeping(
         and not noncanonical_snapshot_dirs
         and not [v for v in incomplete_snapshot_versions if v != "v0"]
     )
+    decision_complete = not undecided_versions and pending_version is None
+    lineage_complete = not missing_parent_versions
+
     checkpoint_guard_complete = snapshot_complete
     if checkpoint_guard_present:
         checkpoint_guard_complete = checkpoint_guard_complete and (
             not missing_manifest_versions
             and not extra_manifest_versions
             and not snapshot_hash_mismatches
-            and not undecided_versions
+            and decision_complete
+            and lineage_complete
+            and finalized
             and submitted_matches_final
         )
     status = "PASS" if checkpoint_guard_complete else "WARN"
+
+    guard_failure_reasons: list[str] = []
+    if missing:
+        guard_failure_reasons.append("missing_snapshot_versions=" + ",".join(missing))
+    if missing_manifest_versions:
+        guard_failure_reasons.append(
+            "missing_manifest_versions=" + ",".join(missing_manifest_versions)
+        )
+    if extra_manifest_versions:
+        guard_failure_reasons.append(
+            "extra_manifest_versions=" + ",".join(extra_manifest_versions)
+        )
+    if snapshot_hash_mismatches:
+        guard_failure_reasons.append(
+            "snapshot_hash_mismatches=" + ",".join(snapshot_hash_mismatches)
+        )
+    if undecided_versions:
+        guard_failure_reasons.append(
+            "undecided_versions=" + ",".join(undecided_versions)
+        )
+    if pending_version is not None:
+        guard_failure_reasons.append("pending_version=" + str(pending_version))
+    if missing_parent_versions:
+        guard_failure_reasons.append(
+            "missing_parent_versions=" + ",".join(missing_parent_versions)
+        )
+    if checkpoint_guard_present and not finalized:
+        guard_failure_reasons.append("state_not_finalized")
+    if checkpoint_guard_present and not submitted_matches_final:
+        guard_failure_reasons.append(
+            "submitted_final_mismatch="
+            + f"submitted:{','.join(submitted_versions) or '<none>'};"
+            + f"matching_final:{','.join(matching_final_versions) or '<none>'}"
+        )
 
     return {
         "status": status,
@@ -583,13 +665,21 @@ def compute_bookkeeping(
         "missing_manifest_versions": missing_manifest_versions,
         "extra_manifest_versions": extra_manifest_versions,
         "snapshot_hash_mismatches": snapshot_hash_mismatches,
+        "canonical_version": canonical_version,
+        "pending_version": pending_version,
+        "finalized": finalized,
+        "final_version": final_version,
         "undecided_versions": undecided_versions,
-        "decision_complete": not undecided_versions,
+        "decision_complete": decision_complete,
+        "missing_parent_versions": missing_parent_versions,
+        "lineage_complete": lineage_complete,
         "final_solver_sha256": final_solver_sha256,
         "matching_final_versions": matching_final_versions,
         "submitted_versions": submitted_versions,
         "submitted_matches_final": submitted_matches_final,
+        "guard_failure_reasons": guard_failure_reasons,
     }
+
 
 
 def concise_action(row: dict[str, Any]) -> str:
@@ -614,7 +704,7 @@ def concise_action(row: dict[str, Any]) -> str:
         description = args.get("description")
         raw_command = str(args.get("command", ""))
         if "version_checkpoint.py" in raw_command:
-            m = re.search(r"version_checkpoint\.py\s+(evaluate|decide|restore|audit|init)\b(?:.*?--version\s+(v[0-9]+))?", raw_command, flags=re.DOTALL)
+            m = re.search(r"version_checkpoint\.py\s+(evaluate|keep|revert|checkout|finalize|audit|status|init)\b(?:.*?--version\s+(v[0-9]+))?", raw_command, flags=re.DOTALL)
             if m:
                 op = m.group(1)
                 version = m.group(2)
@@ -785,7 +875,7 @@ def main() -> None:
     )
 
     summary = {
-        "review_schema_version": "0.6.0",
+        "review_schema_version": "0.7.0",
         "job_name": args.job_name,
         "condition": args.condition,
         "run_number": int(args.run_number),
@@ -817,8 +907,10 @@ def main() -> None:
             "bash_nonzero_calls": trace["bash_nonzero_calls"],
             "bash_nonzero_exit_codes": trace["bash_nonzero_exit_codes"],
             "checkpoint_evaluate_calls": trace["checkpoint_evaluate_calls"],
-            "checkpoint_decide_calls": trace["checkpoint_decide_calls"],
-            "checkpoint_restore_calls": trace["checkpoint_restore_calls"],
+            "checkpoint_keep_calls": trace["checkpoint_keep_calls"],
+            "checkpoint_revert_calls": trace["checkpoint_revert_calls"],
+            "checkpoint_checkout_calls": trace["checkpoint_checkout_calls"],
+            "checkpoint_finalize_calls": trace["checkpoint_finalize_calls"],
             "selfcheck_tool_calls": trace["selfcheck_tool_calls"],
             "scored_selfcheck_executions": trace["scored_selfcheck_executions"],
             "failed_selfcheck_tool_calls": trace["failed_selfcheck_tool_calls"],
@@ -836,11 +928,18 @@ def main() -> None:
             "checkpoint_guard_complete": bookkeeping["checkpoint_guard_complete"],
             "manifest_version_count": bookkeeping["manifest_version_count"],
             "snapshot_hash_mismatches": bookkeeping["snapshot_hash_mismatches"],
+            "canonical_version": bookkeeping["canonical_version"],
+            "pending_version": bookkeeping["pending_version"],
+            "finalized": bookkeeping["finalized"],
+            "final_version": bookkeeping["final_version"],
             "undecided_versions": bookkeeping["undecided_versions"],
             "decision_complete": bookkeeping["decision_complete"],
+            "missing_parent_versions": bookkeeping["missing_parent_versions"],
+            "lineage_complete": bookkeeping["lineage_complete"],
             "matching_final_versions": bookkeeping["matching_final_versions"],
             "submitted_versions": bookkeeping["submitted_versions"],
             "submitted_matches_final": bookkeeping["submitted_matches_final"],
+            "guard_failure_reasons": bookkeeping["guard_failure_reasons"],
             "best_visible_version": best_visible,
             "submitted_version": submitted_version,
         },
@@ -904,8 +1003,10 @@ def main() -> None:
         f"- bash nonzero calls: `{trace['bash_nonzero_calls']}`",
         f"- bash nonzero exit codes: `{trace['bash_nonzero_exit_codes']}`",
         f"- checkpoint evaluate calls: `{trace['checkpoint_evaluate_calls']}`",
-        f"- checkpoint decide calls: `{trace['checkpoint_decide_calls']}`",
-        f"- checkpoint restore calls: `{trace['checkpoint_restore_calls']}`",
+        f"- checkpoint keep calls: `{trace['checkpoint_keep_calls']}`",
+        f"- checkpoint revert calls: `{trace['checkpoint_revert_calls']}`",
+        f"- checkpoint checkout calls: `{trace['checkpoint_checkout_calls']}`",
+        f"- checkpoint finalize calls: `{trace['checkpoint_finalize_calls']}`",
         f"- selfcheck tool calls: `{trace['selfcheck_tool_calls']}`",
         f"- scored selfcheck executions: `{trace['scored_selfcheck_executions']}`",
         f"- failed selfcheck tool calls: `{trace['failed_selfcheck_tool_calls']}`",
@@ -921,14 +1022,21 @@ def main() -> None:
         f"- checkpoint guard complete: `{bookkeeping['checkpoint_guard_complete']}`",
         f"- manifest candidate versions: `{bookkeeping['manifest_version_count']}`",
         f"- snapshot hash mismatches: `{bookkeeping['snapshot_hash_mismatches']}`",
+        f"- canonical version: `{bookkeeping['canonical_version']}`",
+        f"- pending version: `{bookkeeping['pending_version']}`",
+        f"- finalized: `{bookkeeping['finalized']}`",
+        f"- final version: `{bookkeeping['final_version']}`",
         f"- undecided versions: `{bookkeeping['undecided_versions']}`",
         f"- decision complete: `{bookkeeping['decision_complete']}`",
+        f"- missing parent versions: `{bookkeeping['missing_parent_versions']}`",
+        f"- lineage complete: `{bookkeeping['lineage_complete']}`",
         f"- submitted versions: `{bookkeeping['submitted_versions']}`",
         f"- final solver matches submitted snapshot: `{bookkeeping['submitted_matches_final']}`",
         f"- missing snapshot count: `{bookkeeping['missing_snapshot_count']}`",
         f"- missing snapshots: `{bookkeeping['missing_snapshot_versions']}`",
         f"- incomplete snapshot dirs (missing solver.py): `{bookkeeping['incomplete_snapshot_versions']}`",
         f"- noncanonical snapshot dirs: `{bookkeeping['noncanonical_snapshot_dirs']}`",
+        f"- guard failure reasons: `{bookkeeping['guard_failure_reasons']}`",
         "",
         "See `agent-actions.md` for the observable action path and `version-history.csv` for the logged version history.",
     ]

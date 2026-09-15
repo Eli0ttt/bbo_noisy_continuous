@@ -50,7 +50,7 @@ export DEEPSEEK_ALLOW_AGENT_HOST="${DEEPSEEK_ALLOW_AGENT_HOST:-183.230.173.202}"
 export HARBOR_BIN="${HARBOR_BIN:-$HOME/.local/share/uv/tools/harbor/bin/harbor}"
 export HARBOR_PY="${HARBOR_PY:-$HOME/.local/share/uv/tools/harbor/bin/python}"
 export NODE_ROOT="${NODE_ROOT:-$HOME/.nvm/versions/node/v22.23.2}"
-export EXPECTED_AGENT_VERSION="0.6.0-official-autoresearch-checkpoint-guard"
+export EXPECTED_AGENT_VERSION="0.7.0-official-autoresearch-transactional-checkpoints"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "missing environment file: $ENV_FILE" >&2
@@ -215,6 +215,9 @@ BASE_URL_SHA256=$(printf '%s' "$DEEPSEEK_BASE_URL" | sha256sum | awk '{print $1}
   echo "trace_review_sha256=$(sha256sum "$TRACE_REVIEW_PY" | awk '{print $1}')"
   echo "version_checkpoint_helper_sha256=$(sha256sum "$CHECKPOINT_HELPER" | awk '{print $1}')"
   echo "bookkeeping_checkpoint_guard=1"
+  echo "version_checkpoint_protocol=transactional-snapshot-before-official-selfcheck"
+  echo "version_decision_protocol=resolve-before-next-version"
+  echo "final_submission_protocol=deterministic-final-artifact-identity"
   echo "no_cordis_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-no-cordis.yml" | awk '{print $1}')"
   echo "cordis_extra_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-cordis-extra.yml" | awk '{print $1}')"
 } > "$PROTOCOL_FILE"
@@ -245,6 +248,7 @@ TRIAL="${TRIALS[0]}"
 test -f "$TRIAL/result.json"
 test -f "$TRIAL/artifacts/app/methods/main/solver.py"
 
+set +e
 "$HARBOR_PY" - "$JOB_ROOT/result.json" "$TRIAL/result.json" "$CONDITION" "$EXPECTED_AGENT_VERSION" <<'PY'
 import json
 import sys
@@ -255,27 +259,78 @@ trial = json.loads(Path(sys.argv[2]).read_text())
 condition = sys.argv[3]
 expected_version = sys.argv[4]
 
-assert job["n_total_trials"] == 1
-assert job["stats"]["n_completed_trials"] == 1
-assert job["stats"]["n_errored_trials"] == 0
-assert trial["exception_info"] is None
-assert trial["agent_info"]["version"] == expected_version
-metadata = trial["agent_result"]["metadata"]
-assert metadata["condition"] == condition
-assert metadata["official_prompt_protocol"] is True
-assert metadata["rendered_autoresearch_prompt"] is True
-assert metadata["single_persistent_session"] is True
-assert metadata["bookkeeping_checkpoint_guard"] is True
-assert metadata["version_checkpoint_protocol"] == "atomic-snapshot-before-official-selfcheck"
-assert metadata["dsh_permission_mode"] == "danger-full-access"
-assert metadata["isolation_boundary"] == "harbor-docker-task-container"
-reward = trial["verifier_result"]["rewards"]["reward"]
-assert isinstance(reward, (int, float))
+def fail(message: str, code: int = 20) -> None:
+    print("FORMAL_TRIAL_FAIL " + message, file=sys.stderr)
+    raise SystemExit(code)
+
+if job.get("n_total_trials") != 1:
+    fail(f"unexpected_total_trials={job.get('n_total_trials')}")
+stats = job.get("stats") or {}
+if stats.get("n_errored_trials", 0) != 0 or trial.get("exception_info") is not None:
+    fail("trial_exception=" + json.dumps(trial.get("exception_info"), ensure_ascii=False, sort_keys=True), 21)
+if stats.get("n_completed_trials") != 1:
+    fail(f"unexpected_completed_trials={stats.get('n_completed_trials')}", 22)
+
+agent_info = trial.get("agent_info") or {}
+if agent_info.get("version") != expected_version:
+    fail(f"agent_version={agent_info.get('version')} expected={expected_version}", 23)
+
+metadata = ((trial.get("agent_result") or {}).get("metadata") or {})
+required = {
+    "condition": condition,
+    "official_prompt_protocol": True,
+    "rendered_autoresearch_prompt": True,
+    "single_persistent_session": True,
+    "bookkeeping_checkpoint_guard": True,
+    "version_checkpoint_protocol": "transactional-snapshot-before-official-selfcheck",
+    "version_decision_protocol": "resolve-before-next-version",
+    "final_submission_protocol": "deterministic-final-artifact-identity",
+    "checkpoint_guard_complete": True,
+    "decision_complete": True,
+    "lineage_complete": True,
+    "finalized": True,
+    "dsh_permission_mode": "danger-full-access",
+    "isolation_boundary": "harbor-docker-task-container",
+}
+for key, expected in required.items():
+    if metadata.get(key) != expected:
+        fail(f"metadata_{key}={metadata.get(key)!r} expected={expected!r}", 24)
+
+verifier = trial.get("verifier_result")
+if not verifier:
+    fail("verifier_result=null", 25)
+reward = ((verifier.get("rewards") or {}).get("reward"))
+if not isinstance(reward, (int, float)):
+    fail(f"invalid_reward={reward!r}", 26)
 print(f"FORMAL_RESULT_PASS condition={condition} reward={reward}")
 PY
+RESULT_CHECK_RC=$?
+set -e
 
 mv "$PROTOCOL_FILE" "$TRIAL/formal_protocol.txt"
 trap - EXIT
+
+if [ "$RESULT_CHECK_RC" -ne 0 ]; then
+  if [ -f "$TRIAL/agent/autoresearch-audit.json" ]; then
+    "$HARBOR_PY" - "$TRIAL/agent/autoresearch-audit.json" <<'PY' >&2
+import json, sys
+x=json.load(open(sys.argv[1]))
+print(
+    "FORMAL_CHECKPOINT_DIAGNOSTIC "
+    f"checkpoint_guard_complete={int(bool(x.get('checkpoint_guard_complete')))} "
+    f"decision_complete={int(bool(x.get('decision_complete')))} "
+    f"lineage_complete={int(bool(x.get('lineage_complete')))} "
+    f"finalized={int(bool(x.get('finalized')))}"
+)
+reasons=x.get("guard_failure_reasons") or []
+if reasons:
+    print("FORMAL_CHECKPOINT_HARD_FAILURES " + " | ".join(map(str, reasons)))
+if x.get("finalization_error"):
+    print("FORMAL_CHECKPOINT_FINALIZATION_ERROR " + str(x.get("finalization_error")))
+PY
+  fi
+  exit "$RESULT_CHECK_RC"
+fi
 
 AGENT_AUTORESEARCH_AUDIT="$TRIAL/agent/autoresearch-audit.json"
 EXPERIMENT_LOG="$TRIAL/artifacts/app/methods/experiment_log.md"
@@ -337,7 +392,7 @@ for required in \
 done
 
 # Trace/runtime diagnostics are descriptive. Version checkpoint fidelity is a
-# hard pre-verifier contract in agent v0.6.0 and is rechecked here post-hoc.
+# hard pre-verifier contract in agent v0.7.0 and is rechecked here post-hoc.
 read -r TRACE_SELFCHECKS TRACE_FAILED TRACE_LLM_RETRIES TRACE_TOOL_ERRORS TRACE_BASH_NONZERO TRACE_CORDIS TRACE_SANDBOX < <(
   "$HARBOR_PY" - "$TRACE_AUDIT" <<'PY'
 import json, sys
@@ -363,7 +418,7 @@ if [ "$CONDITION" = "no-cordis" ] && [ "$TRACE_CORDIS" -ne 0 ]; then
   exit 1
 fi
 
-read -r BOOKKEEPING_STATUS LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE CHECKPOINT_GUARD DECISION_COMPLETE MISSING_SNAPSHOTS HASH_MISMATCHES < <(
+read -r BOOKKEEPING_STATUS LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE CHECKPOINT_GUARD DECISION_COMPLETE LINEAGE_COMPLETE FINALIZED MISSING_SNAPSHOTS HASH_MISMATCHES < <(
   "$HARBOR_PY" - "$BOOKKEEPING_AUDIT" <<'PY'
 import json, sys
 x=json.load(open(sys.argv[1]))
@@ -374,6 +429,8 @@ print(
     int(bool(x.get('snapshot_complete'))),
     int(bool(x.get('checkpoint_guard_complete'))),
     int(bool(x.get('decision_complete'))),
+    int(bool(x.get('lineage_complete'))),
+    int(bool(x.get('finalized'))),
     x.get('missing_snapshot_count', len(x.get('missing_snapshot_versions', []))),
     len(x.get('snapshot_hash_mismatches', [])),
 )
@@ -395,22 +452,21 @@ print(
 PY
 )
 
-printf 'FORMAL_AUTORESEARCH_AUDIT status=%s logged_versions=%s snapshot_versions=%s snapshot_complete=%s checkpoint_guard_complete=%s decision_complete=%s missing_snapshots=%s hash_mismatches=%s\n' \
-  "$BOOKKEEPING_STATUS" "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE" "$CHECKPOINT_GUARD" "$DECISION_COMPLETE" "$MISSING_SNAPSHOTS" "$HASH_MISMATCHES"
+printf 'FORMAL_AUTORESEARCH_AUDIT status=%s logged_versions=%s snapshot_versions=%s snapshot_complete=%s checkpoint_guard_complete=%s decision_complete=%s lineage_complete=%s finalized=%s missing_snapshots=%s hash_mismatches=%s\n' \
+  "$BOOKKEEPING_STATUS" "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE" "$CHECKPOINT_GUARD" "$DECISION_COMPLETE" "$LINEAGE_COMPLETE" "$FINALIZED" "$MISSING_SNAPSHOTS" "$HASH_MISMATCHES"
 printf 'FORMAL_TRACE_AUDIT scored_selfchecks=%s failed_selfcheck_tool_calls=%s llm_retries=%s tool_api_errors=%s bash_nonzero_calls=%s cordis_calls=%s\n' \
   "$TRACE_SELFCHECKS" "$TRACE_FAILED" "$TRACE_LLM_RETRIES" "$TRACE_TOOL_ERRORS" "$TRACE_BASH_NONZERO" "$TRACE_CORDIS"
 printf 'FORMAL_RUNTIME_AUDIT status=%s elapsed_sec=%s budget_sec=%s margin_sec=%s utilization_pct=%s\n' \
   "$RUNTIME_STATUS" "$RUNTIME_ELAPSED" "$RUNTIME_BUDGET" "$RUNTIME_MARGIN" "$RUNTIME_UTIL"
 
-# v0.6.0 makes historical version fidelity a harness contract. The custom
-# agent checks this before returning to Harbor, so a formal result should never
-# reach this point with incomplete/mutated snapshots. Fail closed if it does.
-if [ "$SNAPSHOT_COMPLETE" -ne 1 ] || [ "$CHECKPOINT_GUARD" -ne 1 ] || [ "$HASH_MISMATCHES" -ne 0 ]; then
-  echo "FORMAL_BOOKKEEPING_AUDIT_FAIL snapshot_complete=$SNAPSHOT_COMPLETE checkpoint_guard_complete=$CHECKPOINT_GUARD missing_snapshots=$MISSING_SNAPSHOTS hash_mismatches=$HASH_MISMATCHES" >&2
+# v0.7.0 makes official-style version transitions transactional. Every
+# intermediate version must be explicitly kept/reverted before the next
+# versioned evaluation, while final submission is derived deterministically
+# from the exact final artifact. By the time hidden verification completes all
+# bookkeeping invariants must therefore be true.
+if [ "$SNAPSHOT_COMPLETE" -ne 1 ] || [ "$CHECKPOINT_GUARD" -ne 1 ] || [ "$DECISION_COMPLETE" -ne 1 ] || [ "$LINEAGE_COMPLETE" -ne 1 ] || [ "$FINALIZED" -ne 1 ] || [ "$HASH_MISMATCHES" -ne 0 ]; then
+  echo "FORMAL_BOOKKEEPING_AUDIT_FAIL snapshot_complete=$SNAPSHOT_COMPLETE checkpoint_guard_complete=$CHECKPOINT_GUARD decision_complete=$DECISION_COMPLETE lineage_complete=$LINEAGE_COMPLETE finalized=$FINALIZED missing_snapshots=$MISSING_SNAPSHOTS hash_mismatches=$HASH_MISMATCHES" >&2
   exit 1
-fi
-if [ "$DECISION_COMPLETE" -ne 1 ]; then
-  echo "FORMAL_BOOKKEEPING_DECISION_WARN: some evaluated versions were not explicitly marked kept/reverted/submitted; snapshots remain complete" >&2
 fi
 
 # This warning is post-hoc telemetry from the official verifier. It is not fed

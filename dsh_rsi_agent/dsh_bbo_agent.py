@@ -27,64 +27,74 @@ class DshBboAgent(BaseAgent):
     _NO_CORDIS_PATCH = "/opt/dsh-config/bbo-no-cordis.yml"
     _CORDIS_PATCH = "/opt/dsh-config/bbo-cordis-extra.yml"
     _CHECKPOINT_HELPER = "/opt/dsh-config/version_checkpoint.py"
-    _VERSION = "0.6.0-official-autoresearch-checkpoint-guard"
+    _VERSION = "0.7.0-official-autoresearch-transactional-checkpoints"
     _PROMPT_PLACEHOLDER = "{{ instruction }}"
     _BOOKKEEPING_ADDENDUM = r"""
 
 ---
 
-## Harness bookkeeping enforcement for the official version/log requirement
+## Harness bookkeeping workflow for the official version/log requirement
 
-The official autoresearch instruction above already requires an experiment log and a
-snapshot for every recorded `v<N>`.  This harness enforces that bookkeeping without
-choosing your experiments, your version count, or your keep/revert decisions.
+The official autoresearch instruction above requires an experiment log, saved versions,
+and explicit keep/rollback decisions. This harness provides a transactional bookkeeping
+helper that enforces those semantics without choosing your hypotheses, version count,
+selfcheck frequency, or optimization method.
 
-For every candidate that you decide to name as a version `vN`, do **not** run the
-versioned evaluation with a bare `python /app/selfcheck.py`.  Instead, before any
-further edit to `/app/methods/main/solver.py`, run:
+For every candidate that you decide to name as a version `vN`, evaluate it with:
 
 ```bash
-python /opt/dsh-config/version_checkpoint.py evaluate --version vN --parent vM --description "brief hypothesis/change"
+python /opt/dsh-config/version_checkpoint.py evaluate --version vN --description "brief hypothesis/change"
 ```
 
-This command snapshots the current `/app/methods/main/` atomically to
-`/app/methods/versions/vN/` **before** running the unmodified official
-`/app/selfcheck.py --json`, then records the visible score in
-`/app/methods/experiment_log.md`.  The command is synchronous, so you cannot edit the
-solver between snapshot and evaluation.  If you would otherwise use a shell timeout for a
-slow candidate, you may add `--timeout SEC`; the helper does not impose one by default.
+The helper first snapshots the current `/app/methods/main/solver.py` immutably to
+`/app/methods/versions/vN/solver.py`, then runs the unmodified official
+`/app/selfcheck.py --json`. The parent version is taken from the helper's canonical
+state, so you do not need to specify it manually.
 
-After you see the score and decide what to do, record the decision:
+After the score, resolve that version before starting another versioned evaluation:
 
 ```bash
-python /opt/dsh-config/version_checkpoint.py decide --version vN --status kept
-python /opt/dsh-config/version_checkpoint.py decide --version vN --status reverted
-python /opt/dsh-config/version_checkpoint.py decide --version vN --status submitted
+python /opt/dsh-config/version_checkpoint.py keep --version vN --note "why this is kept"
 ```
 
-If you need to restore a previously snapshotted version, use:
+or:
 
 ```bash
-python /opt/dsh-config/version_checkpoint.py restore --version vM
+python /opt/dsh-config/version_checkpoint.py revert --version vN --note "why this is reverted"
+```
+
+`revert` atomically restores the parent snapshot. To deliberately branch from an older
+already-saved checkpoint after resolving the current candidate, use:
+
+```bash
+python /opt/dsh-config/version_checkpoint.py checkout --version vM
 ```
 
 Important rules:
 
-- Version numbering and the number/frequency of experiments remain entirely your decision.
+- The helper refuses a new `evaluate` while an earlier candidate is unresolved, so each
+  intermediate experiment receives an explicit kept/reverted status at the time the
+  research decision is made.
+- Version numbering, experiment selection, keep/revert choices, and research strategy
+  remain entirely yours.
 - Direct `selfcheck.py` calls are allowed for unversioned diagnostics, but a diagnostic
-  must not later be called `vN` unless it is re-evaluated through the `evaluate` command.
-- Do not manually create/overwrite `/app/methods/versions/vN` and do not bulk-rewrite the
-  version table in `experiment_log.md`; the helper manages those artifacts.
-- A failed/timed-out versioned selfcheck is still snapshotted and recorded, so failed
-  experiments remain auditable.
-- Before finishing, mark exactly one final version `submitted`; if you intentionally submit
-  the untouched baseline, `python /opt/dsh-config/version_checkpoint.py decide --version v0 --status submitted` is allowed.
-- The harness rejects final handoff if a recorded version lacks its helper manifest or
-  immutable solver snapshot, if a version snapshot was mutated, or if the final solver does
-  not match the single submitted snapshot.
+  must not later be called `vN` unless it is re-evaluated through `evaluate`.
+- Do not manually create or overwrite `/app/methods/versions/vN`,
+  `/app/methods/version_checkpoints.json`, or the version table in
+  `/app/methods/experiment_log.md`; the helper manages these audit artifacts.
+- A failed or timed-out versioned selfcheck is still snapshotted and becomes the sole
+  pending version; explicitly keep it if you want to debug forward from it, or revert it.
+- At the end, simply leave the exact chosen evaluated checkpoint in
+  `/app/methods/main/solver.py`. The harness handoff step deterministically labels that
+  exact checkpoint `submitted` from file identity. It does not select by hidden score or
+  alter the solver.
+- The final handoff is rejected only if version history is internally inconsistent:
+  missing/mutated snapshots, unresolved intermediate decisions, broken lineage, or a
+  final solver that is not an evaluated checkpoint.
 
-This guard changes only research bookkeeping.  It does not change the task, visible data,
-selfcheck implementation, hidden verifier, scoring, or your autonomous research choices.
+This helper changes only local research bookkeeping and version transitions. It does not
+change the task, visible data, official selfcheck implementation, hidden verifier, scorer,
+resource limits, information boundary, or your autonomous research choices.
 """
 
     def __init__(
@@ -266,7 +276,7 @@ selfcheck implementation, hidden verifier, scoring, or your autonomous research 
                     f"task_sha256={task_sha}",
                     f"bookkeeping_addendum_sha256={addendum_sha}",
                     f"rendered_sha256={rendered_sha}",
-                    "rendering=official template literal replacement + bookkeeping guard addendum",
+                    "rendering=official template literal replacement + transactional bookkeeping workflow addendum",
                     "",
                 ]
             ),
@@ -284,7 +294,9 @@ selfcheck implementation, hidden verifier, scoring, or your autonomous research 
             "single_persistent_session": True,
             "bookkeeping_checkpoint_guard": True,
             "version_checkpoint_helper": self._CHECKPOINT_HELPER,
-            "version_checkpoint_protocol": "atomic-snapshot-before-official-selfcheck",
+            "version_checkpoint_protocol": "transactional-snapshot-before-official-selfcheck",
+            "version_decision_protocol": "resolve-before-next-version",
+            "final_submission_protocol": "deterministic-final-artifact-identity",
             "workspace": "/app",
             "dsh_permission_mode": "danger-full-access",
             "isolation_boundary": "harbor-docker-task-container",
@@ -301,6 +313,17 @@ selfcheck implementation, hidden verifier, scoring, or your autonomous research 
             "snapshot_complete": self._bookkeeping_audit.get(
                 "snapshot_complete", False
             ),
+            "checkpoint_guard_complete": self._bookkeeping_audit.get(
+                "checkpoint_guard_complete", False
+            ),
+            "decision_complete": self._bookkeeping_audit.get(
+                "decision_complete", False
+            ),
+            "lineage_complete": self._bookkeeping_audit.get(
+                "lineage_complete", False
+            ),
+            "finalized": self._bookkeeping_audit.get("finalized", False),
+            "final_version": self._bookkeeping_audit.get("final_version"),
         }
 
     async def setup(self, environment: BaseEnvironment) -> None:
@@ -378,18 +401,20 @@ selfcheck implementation, hidden verifier, scoring, or your autonomous research 
         self._write_optional_log("checkpoint-init.stdout.log", checkpoint_init.stdout)
         self._write_optional_log("checkpoint-init.stderr.log", checkpoint_init.stderr)
         if checkpoint_init.return_code != 0:
-            raise RuntimeError("failed to initialize version checkpoint guard")
+            raise RuntimeError("failed to initialize transactional version checkpoint state machine")
 
-    async def _audit_research_bookkeeping(
+    async def _finalize_research_bookkeeping(
         self,
         environment: BaseEnvironment,
     ) -> dict[str, Any]:
         # The checkpoint helper is the source of truth for version fidelity.
-        # It verifies that the helper-managed log, manifest, snapshot dirs and
-        # recorded solver hashes agree.  This audit runs before Harbor is
-        # allowed to hand the final artifact to the hidden verifier.
+        # Finalization deterministically assigns the submitted label from the
+        # exact solver artifact left in methods/main, then verifies log,
+        # manifest, explicit intermediate decisions, immutable snapshots,
+        # lineage and final-artifact identity before Harbor can hand off to the
+        # hidden verifier.
         audit = await environment.exec(
-            f"python3 {shlex.quote(self._CHECKPOINT_HELPER)} audit --json",
+            f"python3 {shlex.quote(self._CHECKPOINT_HELPER)} finalize --json",
             cwd="/app",
             env=self._runtime_env(),
             timeout_sec=60,
@@ -400,10 +425,12 @@ selfcheck implementation, hidden verifier, scoring, or your autonomous research 
             parsed = json.loads(audit.stdout or "{}")
         except json.JSONDecodeError as exc:
             raise RuntimeError("invalid JSON from version checkpoint audit") from exc
+        self._bookkeeping_audit = parsed
         if audit.return_code != 0 or not parsed.get("checkpoint_guard_complete", False):
+            reasons = parsed.get("guard_failure_reasons") or []
+            detail = "; ".join(str(x) for x in reasons) if reasons else "unspecified checkpoint state-machine failure"
             raise RuntimeError(
-                "version checkpoint guard rejected final handoff: every recorded v<N> "
-                "must have a matching immutable helper snapshot before hidden verification"
+                "version checkpoint state machine rejected final handoff: " + detail
             )
         return parsed
 
@@ -414,9 +441,10 @@ selfcheck implementation, hidden verifier, scoring, or your autonomous research 
         context: AgentContext,
     ) -> None:
         # The historical custom adapter incorrectly forwarded only the task
-        # instruction.  Render the official autoresearch.j2 explicitly so DSH
+        # instruction. Render the official autoresearch.j2 explicitly so DSH
         # receives the official research loop + task section, followed only by
-        # a harness bookkeeping guard that enforces the prompt's own version/log requirement.
+        # a harness bookkeeping workflow that operationalizes the prompt's own
+        # version/log/keep-or-revert requirement.
         rendered_prompt = self._render_official_prompt(instruction)
 
         # One persistent DSH conversation is one outer research rollout.  Do
@@ -456,5 +484,9 @@ selfcheck implementation, hidden verifier, scoring, or your autonomous research 
                 f"see {self.logs_dir / 'handoff.stderr.log'}"
             )
 
-        self._bookkeeping_audit = await self._audit_research_bookkeeping(environment)
+        try:
+            self._bookkeeping_audit = await self._finalize_research_bookkeeping(environment)
+        except Exception:
+            self._record_result(context, result)
+            raise
         self._record_result(context, result)
