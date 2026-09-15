@@ -329,13 +329,16 @@ done
 
 # These are descriptive audits, not selection gates. A model that snapshots
 # versions incompletely remains an observed result rather than being rerun.
-read -r TRACE_SELFCHECKS TRACE_FAILED TRACE_CORDIS TRACE_SANDBOX < <(
+read -r TRACE_SELFCHECKS TRACE_FAILED TRACE_LLM_RETRIES TRACE_TOOL_ERRORS TRACE_BASH_NONZERO TRACE_CORDIS TRACE_SANDBOX < <(
   "$HARBOR_PY" - "$TRACE_AUDIT" <<'PY'
 import json, sys
 x=json.load(open(sys.argv[1]))
 print(
     x.get('scored_selfcheck_executions', 0),
     x.get('failed_selfcheck_tool_calls', 0),
+    x.get('llm_retry_events', 0),
+    x.get('tool_api_errors', 0),
+    x.get('bash_nonzero_calls', 0),
     x.get('cordis_related_calls', 0),
     x.get('sandbox_backend_failures', 0),
 )
@@ -351,14 +354,16 @@ if [ "$CONDITION" = "no-cordis" ] && [ "$TRACE_CORDIS" -ne 0 ]; then
   exit 1
 fi
 
-read -r LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE < <(
+read -r BOOKKEEPING_STATUS LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE MISSING_SNAPSHOTS < <(
   "$HARBOR_PY" - "$BOOKKEEPING_AUDIT" <<'PY'
 import json, sys
 x=json.load(open(sys.argv[1]))
 print(
+    x.get('status', 'WARN'),
     x.get('logged_version_count', 0),
     x.get('snapshot_version_count', 0),
     int(bool(x.get('snapshot_complete'))),
+    x.get('missing_snapshot_count', len(x.get('missing_snapshot_versions', []))),
 )
 PY
 )
@@ -378,12 +383,19 @@ print(
 PY
 )
 
-printf 'FORMAL_AUTORESEARCH_AUDIT logged_versions=%s snapshot_versions=%s snapshot_complete=%s\n' \
-  "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE"
-printf 'FORMAL_TRACE_AUDIT scored_selfchecks=%s failed_selfcheck_tool_calls=%s cordis_calls=%s\n' \
-  "$TRACE_SELFCHECKS" "$TRACE_FAILED" "$TRACE_CORDIS"
+printf 'FORMAL_AUTORESEARCH_AUDIT status=%s logged_versions=%s snapshot_versions=%s snapshot_complete=%s missing_snapshots=%s\n' \
+  "$BOOKKEEPING_STATUS" "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE" "$MISSING_SNAPSHOTS"
+printf 'FORMAL_TRACE_AUDIT scored_selfchecks=%s failed_selfcheck_tool_calls=%s llm_retries=%s tool_api_errors=%s bash_nonzero_calls=%s cordis_calls=%s\n' \
+  "$TRACE_SELFCHECKS" "$TRACE_FAILED" "$TRACE_LLM_RETRIES" "$TRACE_TOOL_ERRORS" "$TRACE_BASH_NONZERO" "$TRACE_CORDIS"
 printf 'FORMAL_RUNTIME_AUDIT status=%s elapsed_sec=%s budget_sec=%s margin_sec=%s utilization_pct=%s\n' \
   "$RUNTIME_STATUS" "$RUNTIME_ELAPSED" "$RUNTIME_BUDGET" "$RUNTIME_MARGIN" "$RUNTIME_UTIL"
+
+# Missing version snapshots are a prompt-following/bookkeeping issue, not a
+# verifier-validity failure. Make the incompleteness explicit without rerunning
+# or selecting on hidden results.
+if [ "$BOOKKEEPING_STATUS" = "WARN" ]; then
+  echo "FORMAL_BOOKKEEPING_WARN: snapshot_complete=0 missing_snapshots=$MISSING_SNAPSHOTS; formal verifier result remains valid" >&2
+fi
 
 # This warning is post-hoc telemetry from the official verifier. It is not fed
 # back to the research agent, which avoids hidden-runtime feedback becoming an
