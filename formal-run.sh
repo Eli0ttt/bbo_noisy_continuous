@@ -50,7 +50,7 @@ export DEEPSEEK_ALLOW_AGENT_HOST="${DEEPSEEK_ALLOW_AGENT_HOST:-183.230.173.202}"
 export HARBOR_BIN="${HARBOR_BIN:-$HOME/.local/share/uv/tools/harbor/bin/harbor}"
 export HARBOR_PY="${HARBOR_PY:-$HOME/.local/share/uv/tools/harbor/bin/python}"
 export NODE_ROOT="${NODE_ROOT:-$HOME/.nvm/versions/node/v22.23.2}"
-export EXPECTED_AGENT_VERSION="0.7.0-official-autoresearch-transactional-checkpoints"
+export EXPECTED_AGENT_VERSION="0.8.0-official-autoresearch-transactional-commit"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "missing environment file: $ENV_FILE" >&2
@@ -215,9 +215,9 @@ BASE_URL_SHA256=$(printf '%s' "$DEEPSEEK_BASE_URL" | sha256sum | awk '{print $1}
   echo "trace_review_sha256=$(sha256sum "$TRACE_REVIEW_PY" | awk '{print $1}')"
   echo "version_checkpoint_helper_sha256=$(sha256sum "$CHECKPOINT_HELPER" | awk '{print $1}')"
   echo "bookkeeping_checkpoint_guard=1"
-  echo "version_checkpoint_protocol=transactional-snapshot-before-official-selfcheck"
+  echo "version_checkpoint_protocol=transactional-snapshot-selfcheck-auto-restore"
   echo "version_decision_protocol=resolve-before-next-version"
-  echo "final_submission_protocol=deterministic-final-artifact-identity"
+  echo "final_submission_protocol=last-explicitly-committed-canonical"
   echo "no_cordis_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-no-cordis.yml" | awk '{print $1}')"
   echo "cordis_extra_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-cordis-extra.yml" | awk '{print $1}')"
 } > "$PROTOCOL_FILE"
@@ -282,9 +282,9 @@ required = {
     "rendered_autoresearch_prompt": True,
     "single_persistent_session": True,
     "bookkeeping_checkpoint_guard": True,
-    "version_checkpoint_protocol": "transactional-snapshot-before-official-selfcheck",
+    "version_checkpoint_protocol": "transactional-snapshot-selfcheck-auto-restore",
     "version_decision_protocol": "resolve-before-next-version",
-    "final_submission_protocol": "deterministic-final-artifact-identity",
+    "final_submission_protocol": "last-explicitly-committed-canonical",
     "checkpoint_guard_complete": True,
     "decision_complete": True,
     "lineage_complete": True,
@@ -392,7 +392,7 @@ for required in \
 done
 
 # Trace/runtime diagnostics are descriptive. Version checkpoint fidelity is a
-# hard pre-verifier contract in agent v0.7.0 and is rechecked here post-hoc.
+# hard pre-verifier contract in agent v0.8.0 and is rechecked here post-hoc.
 read -r TRACE_SELFCHECKS TRACE_FAILED TRACE_LLM_RETRIES TRACE_TOOL_ERRORS TRACE_BASH_NONZERO TRACE_CORDIS TRACE_SANDBOX < <(
   "$HARBOR_PY" - "$TRACE_AUDIT" <<'PY'
 import json, sys
@@ -459,7 +459,7 @@ printf 'FORMAL_TRACE_AUDIT scored_selfchecks=%s failed_selfcheck_tool_calls=%s l
 printf 'FORMAL_RUNTIME_AUDIT status=%s elapsed_sec=%s budget_sec=%s margin_sec=%s utilization_pct=%s\n' \
   "$RUNTIME_STATUS" "$RUNTIME_ELAPSED" "$RUNTIME_BUDGET" "$RUNTIME_MARGIN" "$RUNTIME_UTIL"
 
-# v0.7.0 makes official-style version transitions transactional. Every
+# v0.8.0 makes official-style version transitions transactional with explicit commit. Every
 # intermediate version must be explicitly kept/reverted before the next
 # versioned evaluation, while final submission is derived deterministically
 # from the exact final artifact. By the time hidden verification completes all

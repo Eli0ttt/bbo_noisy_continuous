@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "2.0"
+SCHEMA_VERSION = "3.0"
 VERSION_RE = re.compile(r"v[0-9]+")
 FINAL_STATUSES = {"kept", "reverted", "submitted", "baseline"}
 PENDING_STATUSES = {"evaluating", "evaluated", "selfcheck_failed"}
@@ -139,10 +139,11 @@ def write_experiment_log(state: dict[str, Any]) -> None:
         "# Experiment Log",
         "",
         "This log is managed by the harness checkpoint state machine. Every recorded",
-        "version is snapshotted before its official visible selfcheck. Intermediate",
-        "versions must be explicitly kept or reverted before another versioned",
-        "evaluation can begin; the final submitted label is determined from the exact",
-        "solver artifact left in `/app/methods/main/solver.py` at handoff.",
+        "version is snapshotted before its official visible selfcheck. After each",
+        "versioned selfcheck, the live solver is restored to the canonical parent until",
+        "the agent explicitly keeps the candidate. Intermediate versions must be kept or",
+        "reverted before another versioned evaluation; an unresolved candidate is",
+        "transactionally rolled back at handoff and the last canonical checkpoint is submitted.",
         "",
         "| Version | Parent | Description | Score | Anytime | Final | Status | Decision note | Solver SHA256 |",
         "|---|---|---|---:|---:|---:|---|---|---|",
@@ -393,11 +394,26 @@ def evaluate(args: argparse.Namespace) -> int:
             row["selfcheck"]["error"] = (
                 "timeout" if timed_out else "nonzero_exit" if rc != 0 else "missing_score_payload"
             )
+
+        # Transaction semantics: an evaluated candidate is not committed.
+        # Restore the canonical parent before returning to the model.
+        parent = row.get("parent")
+        if not isinstance(parent, str) or parent not in state.get("versions", {}):
+            raise RuntimeError(f"invalid canonical parent for {version}: {parent!r}")
+        restored_sha = restore_snapshot(parent)
+        expected_parent_sha = state["versions"][parent].get("solver_sha256")
+        if expected_parent_sha and restored_sha != expected_parent_sha:
+            raise RuntimeError(
+                f"failed to restore canonical parent {parent} after evaluating {version}: "
+                f"sha256 {restored_sha} != expected {expected_parent_sha}"
+            )
+        row["post_evaluate_restored_to"] = parent
+        row["post_evaluate_restore_sha256"] = restored_sha
+        row["post_evaluate_restored_at"] = utc_now()
         save_state(state)
         score = row.get("score")
         status = row.get("status")
         digest = row.get("solver_sha256")
-        parent = row.get("parent")
 
     print(
         f"VERSION_CHECKPOINT version={version} parent={parent} score={score} "
@@ -405,7 +421,7 @@ def evaluate(args: argparse.Namespace) -> int:
     )
     print(
         f"VERSION_DECISION_REQUIRED version={version} choices=keep,revert "
-        f"before_next_version=1"
+        f"before_next_version=1 main_restored_to={parent}"
     )
     if rc == 0 and payload is None:
         return 65
@@ -428,13 +444,23 @@ def keep(args: argparse.Namespace) -> int:
             raise RuntimeError(
                 f"cannot keep {args.version} from status {row.get('status')!r}"
             )
+        restored_sha = restore_snapshot(args.version)
+        expected_sha = row.get("solver_sha256")
+        if expected_sha and restored_sha != expected_sha:
+            raise RuntimeError(
+                f"failed to commit {args.version}: restored sha256 {restored_sha} != expected {expected_sha}"
+            )
         row["status"] = "kept"
         row["decided_at"] = utc_now()
         row["decision_note"] = args.note or "kept by agent"
+        row["decision_source"] = "agent_keep"
         state["canonical_version"] = args.version
         state["pending_version"] = None
         save_state(state)
-    print(f"VERSION_DECISION version={args.version} status=kept canonical={args.version}")
+    print(
+        f"VERSION_DECISION version={args.version} status=kept canonical={args.version} "
+        f"solver_sha256={restored_sha}"
+    )
     return 0
 
 
@@ -458,6 +484,7 @@ def revert(args: argparse.Namespace) -> int:
         row["decided_at"] = utc_now()
         row["reverted_to"] = target
         row["decision_note"] = args.note or f"reverted by agent to {target}"
+        row["decision_source"] = "agent_revert"
         state["canonical_version"] = target
         state["pending_version"] = None
         save_state(state)
@@ -686,6 +713,7 @@ def audit_payload() -> dict[str, Any]:
         "submitted_matches_final": submitted_matches_final,
         "snapshot_complete": snapshot_complete,
         "guard_failure_reasons": guard_failure_reasons,
+        "auto_reverted_pending_versions": list(state.get("auto_reverted_pending_versions") or []),
         "checkpoint_guard_complete": checkpoint_guard_complete,
     }
 
@@ -706,62 +734,56 @@ def finalize(args: argparse.Namespace) -> int:
                 pending = state.get("pending_version")
                 canonical = state.get("canonical_version")
 
+                if not isinstance(canonical, str) or canonical not in versions:
+                    raise RuntimeError(f"invalid canonical version at handoff: {canonical!r}")
+                canonical_row = versions[canonical]
+
                 if pending:
                     pending_row = versions.get(pending)
-                    canonical_row = versions.get(canonical) if isinstance(canonical, str) else None
                     if not isinstance(pending_row, dict):
                         raise RuntimeError(f"pending version {pending!r} is missing from manifest")
-                    if final_sha == pending_row.get("solver_sha256"):
-                        pending_row["previous_status"] = pending_row.get("status")
-                        pending_row["status"] = "submitted"
-                        pending_row["decided_at"] = utc_now()
-                        pending_row["decision_note"] = (
-                            "submitted deterministically at handoff because the final solver "
-                            "exactly matched this pending evaluated checkpoint"
-                        )
-                        state["canonical_version"] = pending
-                        state["pending_version"] = None
-                        final_version = pending
-                    elif isinstance(canonical_row, dict) and final_sha == canonical_row.get("solver_sha256"):
-                        pending_row["previous_status"] = pending_row.get("status")
-                        pending_row["status"] = "reverted"
-                        pending_row["decided_at"] = utc_now()
-                        pending_row["reverted_to"] = canonical
-                        pending_row["decision_note"] = (
-                            "reverted deterministically at handoff because the final solver "
-                            "matched the canonical parent rather than this pending checkpoint"
-                        )
-                        state["pending_version"] = None
-                        canonical_row["previous_status"] = canonical_row.get("status")
-                        canonical_row["status"] = "submitted"
-                        canonical_row["decided_at"] = utc_now()
-                        canonical_row["decision_note"] = (
-                            "submitted deterministically at handoff from final solver identity"
-                        )
-                        final_version = canonical
-                    else:
+
+                    # An unresolved pending candidate is an uncommitted transaction.
+                    # Never infer submission from it merely being the last evaluated file.
+                    if final_sha != canonical_row.get("solver_sha256"):
+                        if final_sha == pending_row.get("solver_sha256"):
+                            raise RuntimeError(
+                                f"pending version {pending} is uncommitted but the final solver "
+                                "matches its snapshot; explicitly keep it before finishing"
+                            )
                         raise RuntimeError(
                             "uncheckpointed final artifact: while "
-                            f"{pending} was pending, final solver matched neither pending "
-                            f"{pending} nor canonical parent {canonical}"
+                            f"{pending} was pending, the final solver no longer matched "
+                            f"canonical checkpoint {canonical}"
                         )
+                    pending_row["previous_status"] = pending_row.get("status")
+                    pending_row["status"] = "reverted"
+                    pending_row["decided_at"] = utc_now()
+                    pending_row["reverted_to"] = canonical
+                    pending_row["decision_source"] = "harness_auto_abort_uncommitted_at_handoff"
+                    pending_row["decision_note"] = (
+                        "uncommitted pending candidate transactionally reverted at handoff; "
+                        f"canonical checkpoint {canonical} remained the live solver"
+                    )
+                    state.setdefault("auto_reverted_pending_versions", []).append(pending)
+                    state["pending_version"] = None
                 else:
-                    if not isinstance(canonical, str) or canonical not in versions:
-                        raise RuntimeError(f"invalid canonical version at handoff: {canonical!r}")
-                    canonical_row = versions[canonical]
                     if final_sha != canonical_row.get("solver_sha256"):
                         raise RuntimeError(
                             "uncheckpointed final artifact: final solver does not match "
-                            f"canonical checkpoint {canonical}; evaluate the final candidate "
-                            "before finishing"
+                            f"canonical checkpoint {canonical}; evaluate and keep the final "
+                            "candidate before finishing"
                         )
-                    canonical_row["previous_status"] = canonical_row.get("status")
-                    canonical_row["status"] = "submitted"
-                    canonical_row["decided_at"] = utc_now()
-                    canonical_row["decision_note"] = (
-                        "submitted deterministically at handoff from final solver identity"
-                    )
-                    final_version = canonical
+
+                canonical_row["previous_status"] = canonical_row.get("status")
+                canonical_row["status"] = "submitted"
+                canonical_row["decided_at"] = utc_now()
+                canonical_row["decision_source"] = "harness_submit_canonical_at_handoff"
+                canonical_row["decision_note"] = (
+                    "submitted deterministically at handoff from the last explicitly "
+                    "committed canonical checkpoint"
+                )
+                final_version = canonical
 
                 # There must never be multiple submitted labels.
                 for version, row in versions.items():
@@ -862,7 +884,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_finalize = sub.add_parser(
         "finalize",
-        help="freeze the final artifact and assign submitted/reverted labels from exact file identity",
+        help="abort any uncommitted pending candidate, then submit the last committed canonical checkpoint",
     )
     p_finalize.add_argument("--json", action="store_true")
     p_finalize.set_defaults(func=finalize)

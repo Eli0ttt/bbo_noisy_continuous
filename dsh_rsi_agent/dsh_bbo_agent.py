@@ -27,18 +27,18 @@ class DshBboAgent(BaseAgent):
     _NO_CORDIS_PATCH = "/opt/dsh-config/bbo-no-cordis.yml"
     _CORDIS_PATCH = "/opt/dsh-config/bbo-cordis-extra.yml"
     _CHECKPOINT_HELPER = "/opt/dsh-config/version_checkpoint.py"
-    _VERSION = "0.7.0-official-autoresearch-transactional-checkpoints"
+    _VERSION = "0.8.0-official-autoresearch-transactional-commit"
     _PROMPT_PLACEHOLDER = "{{ instruction }}"
     _BOOKKEEPING_ADDENDUM = r"""
 
 ---
 
-## Harness bookkeeping workflow for the official version/log requirement
+## Harness transactional bookkeeping for the official version/log requirement
 
 The official autoresearch instruction above requires an experiment log, saved versions,
-and explicit keep/rollback decisions. This harness provides a transactional bookkeeping
-helper that enforces those semantics without choosing your hypotheses, version count,
-selfcheck frequency, or optimization method.
+and explicit keep/rollback decisions. This harness provides a local transactional helper
+that enforces those semantics without choosing your hypotheses, version count, selfcheck
+frequency, or optimization method.
 
 For every candidate that you decide to name as a version `vN`, evaluate it with:
 
@@ -46,12 +46,11 @@ For every candidate that you decide to name as a version `vN`, evaluate it with:
 python /opt/dsh-config/version_checkpoint.py evaluate --version vN --description "brief hypothesis/change"
 ```
 
-The helper first snapshots the current `/app/methods/main/solver.py` immutably to
+The helper first snapshots the exact candidate from `/app/methods/main/solver.py` to
 `/app/methods/versions/vN/solver.py`, then runs the unmodified official
-`/app/selfcheck.py --json`. The parent version is taken from the helper's canonical
-state, so you do not need to specify it manually.
-
-After the score, resolve that version before starting another versioned evaluation:
+`/app/selfcheck.py --json`. After the selfcheck it automatically restores the current
+canonical parent into `/app/methods/main/solver.py`. The candidate is therefore an
+uncommitted transaction until you explicitly choose:
 
 ```bash
 python /opt/dsh-config/version_checkpoint.py keep --version vN --note "why this is kept"
@@ -63,8 +62,11 @@ or:
 python /opt/dsh-config/version_checkpoint.py revert --version vN --note "why this is reverted"
 ```
 
-`revert` atomically restores the parent snapshot. To deliberately branch from an older
-already-saved checkpoint after resolving the current candidate, use:
+`keep` commits the candidate by restoring its snapshot to `methods/main` and making it
+canonical. `revert` leaves/restores the parent canonical. A later versioned evaluation
+is refused until the pending candidate is resolved.
+
+To branch from an older saved checkpoint after resolving the current candidate:
 
 ```bash
 python /opt/dsh-config/version_checkpoint.py checkout --version vM
@@ -72,29 +74,24 @@ python /opt/dsh-config/version_checkpoint.py checkout --version vM
 
 Important rules:
 
-- The helper refuses a new `evaluate` while an earlier candidate is unresolved, so each
-  intermediate experiment receives an explicit kept/reverted status at the time the
-  research decision is made.
-- Version numbering, experiment selection, keep/revert choices, and research strategy
-  remain entirely yours.
+- Do not edit `methods/main/solver.py` for the next experiment while a candidate is pending.
+- Version numbering, hypotheses, experiment selection, keep/revert choices, and research
+  strategy remain yours.
 - Direct `selfcheck.py` calls are allowed for unversioned diagnostics, but a diagnostic
-  must not later be called `vN` unless it is re-evaluated through `evaluate`.
-- Do not manually create or overwrite `/app/methods/versions/vN`,
-  `/app/methods/version_checkpoints.json`, or the version table in
-  `/app/methods/experiment_log.md`; the helper manages these audit artifacts.
-- A failed or timed-out versioned selfcheck is still snapshotted and becomes the sole
-  pending version; explicitly keep it if you want to debug forward from it, or revert it.
-- At the end, simply leave the exact chosen evaluated checkpoint in
-  `/app/methods/main/solver.py`. The harness handoff step deterministically labels that
-  exact checkpoint `submitted` from file identity. It does not select by hidden score or
-  alter the solver.
-- The final handoff is rejected only if version history is internally inconsistent:
-  missing/mutated snapshots, unresolved intermediate decisions, broken lineage, or a
-  final solver that is not an evaluated checkpoint.
+  must not later be called `vN` unless re-evaluated through `evaluate`.
+- Do not manually overwrite version snapshots, the checkpoint manifest, or the version table.
+- A failed/timed-out versioned selfcheck is still snapshotted and pending; keep it only if
+  you intentionally want to debug forward from that exact candidate, otherwise revert it.
+- The final submission is the last explicitly committed canonical checkpoint.
+  If the headless model turn ends with one candidate still pending, that candidate is an
+  uncommitted transaction: the handoff records it as reverted and submits the canonical
+  parent. This rule is deterministic and score-independent.
+- Uncheckpointed edits, missing/mutated snapshots, broken lineage, or a final solver that
+  is not the canonical checkpoint remain hard failures.
 
-This helper changes only local research bookkeeping and version transitions. It does not
-change the task, visible data, official selfcheck implementation, hidden verifier, scorer,
-resource limits, information boundary, or your autonomous research choices.
+The helper changes only local research bookkeeping/version transitions. It does not alter
+the task, visible data, official selfcheck or score, hidden verifier, scorer, resource
+limits, information boundary, or your autonomous research choices.
 """
 
     def __init__(
@@ -276,7 +273,7 @@ resource limits, information boundary, or your autonomous research choices.
                     f"task_sha256={task_sha}",
                     f"bookkeeping_addendum_sha256={addendum_sha}",
                     f"rendered_sha256={rendered_sha}",
-                    "rendering=official template literal replacement + transactional bookkeeping workflow addendum",
+                    "rendering=official template literal replacement + transactional commit bookkeeping addendum",
                     "",
                 ]
             ),
@@ -294,9 +291,9 @@ resource limits, information boundary, or your autonomous research choices.
             "single_persistent_session": True,
             "bookkeeping_checkpoint_guard": True,
             "version_checkpoint_helper": self._CHECKPOINT_HELPER,
-            "version_checkpoint_protocol": "transactional-snapshot-before-official-selfcheck",
+            "version_checkpoint_protocol": "transactional-snapshot-selfcheck-auto-restore",
             "version_decision_protocol": "resolve-before-next-version",
-            "final_submission_protocol": "deterministic-final-artifact-identity",
+            "final_submission_protocol": "last-explicitly-committed-canonical",
             "workspace": "/app",
             "dsh_permission_mode": "danger-full-access",
             "isolation_boundary": "harbor-docker-task-container",
@@ -408,11 +405,9 @@ resource limits, information boundary, or your autonomous research choices.
         environment: BaseEnvironment,
     ) -> dict[str, Any]:
         # The checkpoint helper is the source of truth for version fidelity.
-        # Finalization deterministically assigns the submitted label from the
-        # exact solver artifact left in methods/main, then verifies log,
-        # manifest, explicit intermediate decisions, immutable snapshots,
-        # lineage and final-artifact identity before Harbor can hand off to the
-        # hidden verifier.
+        # Evaluation is transactional: only `keep` commits a candidate.
+        # Finalization aborts at most one still-pending uncommitted candidate
+        # and submits the last explicitly committed canonical checkpoint.
         audit = await environment.exec(
             f"python3 {shlex.quote(self._CHECKPOINT_HELPER)} finalize --json",
             cwd="/app",

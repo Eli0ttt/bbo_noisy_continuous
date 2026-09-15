@@ -522,6 +522,7 @@ def compute_bookkeeping(
     pending_version: str | None = None
     finalized = False
     final_version: str | None = None
+    auto_reverted_pending_versions: list[str] = []
 
     checkpoint_guard_present = isinstance(checkpoint_state, dict) and isinstance(
         checkpoint_state.get("versions"), dict
@@ -543,6 +544,9 @@ def compute_bookkeeping(
         pending_version = checkpoint_state.get("pending_version")
         finalized = bool(checkpoint_state.get("finalized"))
         final_version = checkpoint_state.get("final_version")
+        auto_reverted_pending_versions = list(
+            checkpoint_state.get("auto_reverted_pending_versions") or []
+        )
 
         for version in manifest_versions:
             row = manifest_map.get(version) or {}
@@ -678,6 +682,7 @@ def compute_bookkeeping(
         "submitted_versions": submitted_versions,
         "submitted_matches_final": submitted_matches_final,
         "guard_failure_reasons": guard_failure_reasons,
+        "auto_reverted_pending_versions": auto_reverted_pending_versions,
     }
 
 
@@ -875,7 +880,7 @@ def main() -> None:
     )
 
     summary = {
-        "review_schema_version": "0.7.0",
+        "review_schema_version": "0.8.0",
         "job_name": args.job_name,
         "condition": args.condition,
         "run_number": int(args.run_number),
@@ -940,6 +945,7 @@ def main() -> None:
             "submitted_versions": bookkeeping["submitted_versions"],
             "submitted_matches_final": bookkeeping["submitted_matches_final"],
             "guard_failure_reasons": bookkeeping["guard_failure_reasons"],
+            "auto_reverted_pending_versions": bookkeeping["auto_reverted_pending_versions"],
             "best_visible_version": best_visible,
             "submitted_version": submitted_version,
         },
@@ -1037,6 +1043,7 @@ def main() -> None:
         f"- incomplete snapshot dirs (missing solver.py): `{bookkeeping['incomplete_snapshot_versions']}`",
         f"- noncanonical snapshot dirs: `{bookkeeping['noncanonical_snapshot_dirs']}`",
         f"- guard failure reasons: `{bookkeeping['guard_failure_reasons']}`",
+        f"- auto-reverted uncommitted pending versions at handoff: `{bookkeeping['auto_reverted_pending_versions']}`",
         "",
         "See `agent-actions.md` for the observable action path and `version-history.csv` for the logged version history.",
     ]
