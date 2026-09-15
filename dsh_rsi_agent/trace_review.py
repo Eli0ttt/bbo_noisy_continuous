@@ -35,6 +35,15 @@ def safe_float(value: Any) -> float | None:
         return None
 
 
+def sha256_file(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def extract_tool_result(d: dict[str, Any]) -> tuple[str, bool]:
     message = d.get("message") if isinstance(d.get("message"), dict) else d
     content = message.get("content") if isinstance(message, dict) else None
@@ -208,6 +217,9 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
     tool_api_errors = 0
     bash_nonzero_calls = 0
     bash_nonzero_exit_codes: collections.Counter[str] = collections.Counter()
+    checkpoint_evaluate_calls = 0
+    checkpoint_decide_calls = 0
+    checkpoint_restore_calls = 0
     action_rows: list[dict[str, Any]] = []
 
     for index, call_id in enumerate(ordered_ids, start=1):
@@ -236,7 +248,19 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
         if "cordis" in name.lower() or "cordis" in rendered_args.lower():
             cordis_related_calls += 1
 
-        is_selfcheck = name == "bash" and "selfcheck" in rendered_args
+        command_text = str(args.get("command", "")) if name == "bash" else ""
+        is_checkpoint_evaluate = (
+            name == "bash"
+            and "version_checkpoint.py" in command_text
+            and re.search(r"(?:^|\s)evaluate(?:\s|$)", command_text) is not None
+        )
+        if is_checkpoint_evaluate:
+            checkpoint_evaluate_calls += 1
+        if name == "bash" and "version_checkpoint.py" in command_text and re.search(r"(?:^|\s)decide(?:\s|$)", command_text):
+            checkpoint_decide_calls += 1
+        if name == "bash" and "version_checkpoint.py" in command_text and re.search(r"(?:^|\s)restore(?:\s|$)", command_text):
+            checkpoint_restore_calls += 1
+        is_selfcheck = name == "bash" and ("selfcheck" in rendered_args or is_checkpoint_evaluate)
         score_payloads: list[dict[str, Any]] = []
         if is_selfcheck:
             selfcheck_tool_calls += 1
@@ -300,6 +324,9 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
         "tool_api_errors": tool_api_errors,
         "bash_nonzero_calls": bash_nonzero_calls,
         "bash_nonzero_exit_codes": dict(sorted(bash_nonzero_exit_codes.items())),
+        "checkpoint_evaluate_calls": checkpoint_evaluate_calls,
+        "checkpoint_decide_calls": checkpoint_decide_calls,
+        "checkpoint_restore_calls": checkpoint_restore_calls,
         "selfcheck_tool_calls": selfcheck_tool_calls,
         "scored_selfcheck_executions": scored_selfcheck_executions,
         "failed_selfcheck_tool_calls": selfcheck_failed_tool_calls,
@@ -428,6 +455,8 @@ def compute_bookkeeping(
     experiment_log: Path,
     versions_dir: Path,
     versions: list[dict[str, Any]],
+    checkpoint_state: dict[str, Any] | None = None,
+    final_solver: Path | None = None,
 ) -> dict[str, Any]:
     all_snapshot_dirs = (
         sorted((p.name for p in versions_dir.iterdir() if p.is_dir()))
@@ -459,13 +488,70 @@ def compute_bookkeeping(
     extra = [
         v for v in candidate_snapshot_versions if v not in logged_candidate_versions
     ]
+
+    manifest_versions: list[str] = []
+    manifest_candidate_versions: list[str] = []
+    missing_manifest_versions: list[str] = []
+    extra_manifest_versions: list[str] = []
+    snapshot_hash_mismatches: list[str] = []
+    undecided_versions: list[str] = []
+    final_solver_sha256: str | None = None
+    matching_final_versions: list[str] = []
+    submitted_versions: list[str] = []
+    submitted_matches_final = False
+    checkpoint_guard_present = isinstance(checkpoint_state, dict) and isinstance(
+        checkpoint_state.get("versions"), dict
+    )
+    if checkpoint_guard_present:
+        manifest_map = checkpoint_state.get("versions", {})
+        manifest_versions = sorted(
+            [v for v in manifest_map if re.fullmatch(r"v[0-9]+", v)],
+            key=_parse_version_number,
+        )
+        manifest_candidate_versions = [v for v in manifest_versions if v != "v0"]
+        missing_manifest_versions = [
+            v for v in logged_candidate_versions if v not in manifest_candidate_versions
+        ]
+        extra_manifest_versions = [
+            v for v in manifest_candidate_versions if v not in logged_candidate_versions
+        ]
+        for version in manifest_versions:
+            row = manifest_map.get(version) or {}
+            solver = versions_dir / version / "solver.py"
+            expected = row.get("solver_sha256")
+            if expected and solver.is_file() and sha256_file(solver) != expected:
+                snapshot_hash_mismatches.append(version)
+            if version != "v0" and row.get("status") in {"evaluating", "evaluated"}:
+                undecided_versions.append(version)
+        if final_solver is not None and final_solver.is_file():
+            final_solver_sha256 = sha256_file(final_solver)
+            matching_final_versions = [
+                v for v in manifest_versions
+                if manifest_map.get(v, {}).get("solver_sha256") == final_solver_sha256
+            ]
+        submitted_versions = [
+            v for v in manifest_versions
+            if manifest_map.get(v, {}).get("status") == "submitted"
+        ]
+        submitted_matches_final = (
+            len(submitted_versions) == 1 and submitted_versions[0] in matching_final_versions
+        )
+
     snapshot_complete = (
-        bool(logged_candidate_versions)
-        and not missing
+        not missing
         and not noncanonical_snapshot_dirs
         and not [v for v in incomplete_snapshot_versions if v != "v0"]
     )
-    status = "PASS" if snapshot_complete else "WARN"
+    checkpoint_guard_complete = snapshot_complete
+    if checkpoint_guard_present:
+        checkpoint_guard_complete = checkpoint_guard_complete and (
+            not missing_manifest_versions
+            and not extra_manifest_versions
+            and not snapshot_hash_mismatches
+            and not undecided_versions
+            and submitted_matches_final
+        )
+    status = "PASS" if checkpoint_guard_complete else "WARN"
 
     return {
         "status": status,
@@ -489,6 +575,20 @@ def compute_bookkeeping(
         "missing_snapshot_count": len(missing),
         "extra_snapshot_versions": extra,
         "snapshot_complete": snapshot_complete,
+        "checkpoint_guard_present": checkpoint_guard_present,
+        "checkpoint_guard_complete": checkpoint_guard_complete,
+        "manifest_versions": manifest_versions,
+        "manifest_candidate_versions": manifest_candidate_versions,
+        "manifest_version_count": len(manifest_candidate_versions),
+        "missing_manifest_versions": missing_manifest_versions,
+        "extra_manifest_versions": extra_manifest_versions,
+        "snapshot_hash_mismatches": snapshot_hash_mismatches,
+        "undecided_versions": undecided_versions,
+        "decision_complete": not undecided_versions,
+        "final_solver_sha256": final_solver_sha256,
+        "matching_final_versions": matching_final_versions,
+        "submitted_versions": submitted_versions,
+        "submitted_matches_final": submitted_matches_final,
     }
 
 
@@ -512,7 +612,14 @@ def concise_action(row: dict[str, Any]) -> str:
         return f"grep `{pattern}`" + (f" in `{include}`" if include else "")
     if name == "bash":
         description = args.get("description")
-        command = str(args.get("command", "")).replace("\n", " ; ")
+        raw_command = str(args.get("command", ""))
+        if "version_checkpoint.py" in raw_command:
+            m = re.search(r"version_checkpoint\.py\s+(evaluate|decide|restore|audit|init)\b(?:.*?--version\s+(v[0-9]+))?", raw_command, flags=re.DOTALL)
+            if m:
+                op = m.group(1)
+                version = m.group(2)
+                return f"checkpoint {op}" + (f" `{version}`" if version else "")
+        command = raw_command.replace("\n", " ; ")
         if len(command) > 180:
             command = command[:177] + "..."
         prefix = f"{description}: " if description else ""
@@ -566,6 +673,9 @@ def write_version_history_csv(path: Path, versions: list[dict[str, Any]]) -> Non
         "status",
         "snapshot_dir_exists",
         "snapshot_exists",
+        "manifest_exists",
+        "manifest_solver_sha256",
+        "manifest_sha256_match",
         "source_format",
     ]
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -611,6 +721,7 @@ def main() -> None:
     experiment_log = trial / "artifacts/app/methods/experiment_log.md"
     versions_dir = trial / "artifacts/app/methods/versions"
     final_solver = trial / "artifacts/app/methods/main/solver.py"
+    checkpoint_state_path = trial / "artifacts/app/methods/version_checkpoints.json"
     bookkeeping_path = trial / "agent/autoresearch-audit.json"
     score_details_path = trial / "verifier/score_details.json"
     grade_debug_path = trial / "verifier/grade_debug.json"
@@ -618,8 +729,9 @@ def main() -> None:
 
     trace = parse_trace(trace_path)
     versions = parse_experiment_log(experiment_log, versions_dir)
+    checkpoint_state = load_json(checkpoint_state_path, {}) or {}
     adapter_bookkeeping = load_json(bookkeeping_path, {}) or {}
-    bookkeeping = compute_bookkeeping(experiment_log, versions_dir, versions)
+    bookkeeping = compute_bookkeeping(experiment_log, versions_dir, versions, checkpoint_state, final_solver)
     bookkeeping["final_solver_exists"] = final_solver.is_file()
     score_details = load_json(score_details_path, {}) or {}
     grade_debug = load_json(grade_debug_path, {}) or {}
@@ -673,7 +785,7 @@ def main() -> None:
     )
 
     summary = {
-        "review_schema_version": "0.5.1",
+        "review_schema_version": "0.6.0",
         "job_name": args.job_name,
         "condition": args.condition,
         "run_number": int(args.run_number),
@@ -704,6 +816,9 @@ def main() -> None:
             "tool_api_errors": trace["tool_api_errors"],
             "bash_nonzero_calls": trace["bash_nonzero_calls"],
             "bash_nonzero_exit_codes": trace["bash_nonzero_exit_codes"],
+            "checkpoint_evaluate_calls": trace["checkpoint_evaluate_calls"],
+            "checkpoint_decide_calls": trace["checkpoint_decide_calls"],
+            "checkpoint_restore_calls": trace["checkpoint_restore_calls"],
             "selfcheck_tool_calls": trace["selfcheck_tool_calls"],
             "scored_selfcheck_executions": trace["scored_selfcheck_executions"],
             "failed_selfcheck_tool_calls": trace["failed_selfcheck_tool_calls"],
@@ -717,6 +832,15 @@ def main() -> None:
             "missing_snapshot_versions": bookkeeping["missing_snapshot_versions"],
             "noncanonical_snapshot_dirs": bookkeeping["noncanonical_snapshot_dirs"],
             "snapshot_complete": bookkeeping["snapshot_complete"],
+            "checkpoint_guard_present": bookkeeping["checkpoint_guard_present"],
+            "checkpoint_guard_complete": bookkeeping["checkpoint_guard_complete"],
+            "manifest_version_count": bookkeeping["manifest_version_count"],
+            "snapshot_hash_mismatches": bookkeeping["snapshot_hash_mismatches"],
+            "undecided_versions": bookkeeping["undecided_versions"],
+            "decision_complete": bookkeeping["decision_complete"],
+            "matching_final_versions": bookkeeping["matching_final_versions"],
+            "submitted_versions": bookkeeping["submitted_versions"],
+            "submitted_matches_final": bookkeeping["submitted_matches_final"],
             "best_visible_version": best_visible,
             "submitted_version": submitted_version,
         },
@@ -779,6 +903,9 @@ def main() -> None:
         f"- tool API errors: `{trace['tool_api_errors']}`",
         f"- bash nonzero calls: `{trace['bash_nonzero_calls']}`",
         f"- bash nonzero exit codes: `{trace['bash_nonzero_exit_codes']}`",
+        f"- checkpoint evaluate calls: `{trace['checkpoint_evaluate_calls']}`",
+        f"- checkpoint decide calls: `{trace['checkpoint_decide_calls']}`",
+        f"- checkpoint restore calls: `{trace['checkpoint_restore_calls']}`",
         f"- selfcheck tool calls: `{trace['selfcheck_tool_calls']}`",
         f"- scored selfcheck executions: `{trace['scored_selfcheck_executions']}`",
         f"- failed selfcheck tool calls: `{trace['failed_selfcheck_tool_calls']}`",
@@ -790,6 +917,14 @@ def main() -> None:
         f"- logged candidate versions: `{bookkeeping['logged_version_count']}`",
         f"- candidate snapshot directories: `{bookkeeping['snapshot_version_count']}`",
         f"- snapshot complete: `{bookkeeping['snapshot_complete']}`",
+        f"- checkpoint guard present: `{bookkeeping['checkpoint_guard_present']}`",
+        f"- checkpoint guard complete: `{bookkeeping['checkpoint_guard_complete']}`",
+        f"- manifest candidate versions: `{bookkeeping['manifest_version_count']}`",
+        f"- snapshot hash mismatches: `{bookkeeping['snapshot_hash_mismatches']}`",
+        f"- undecided versions: `{bookkeeping['undecided_versions']}`",
+        f"- decision complete: `{bookkeeping['decision_complete']}`",
+        f"- submitted versions: `{bookkeeping['submitted_versions']}`",
+        f"- final solver matches submitted snapshot: `{bookkeeping['submitted_matches_final']}`",
         f"- missing snapshot count: `{bookkeeping['missing_snapshot_count']}`",
         f"- missing snapshots: `{bookkeeping['missing_snapshot_versions']}`",
         f"- incomplete snapshot dirs (missing solver.py): `{bookkeeping['incomplete_snapshot_versions']}`",
@@ -827,6 +962,7 @@ def main() -> None:
     # curated surface. Large trace uses a hard link when possible to avoid extra disk.
     hardlink_or_copy(trace_path, out_dir / "agent-trace.jsonl.zstd")
     copy_if_nonempty(experiment_log, out_dir / "experiment_log.md")
+    copy_if_nonempty(checkpoint_state_path, out_dir / "version_checkpoints.json")
     copy_if_nonempty(final_solver, out_dir / "final_solver.py")
     copy_if_nonempty(score_details_path, out_dir / "verifier-score-details.json")
     copy_if_nonempty(trial / "formal_protocol.txt", out_dir / "meta/formal_protocol.txt")

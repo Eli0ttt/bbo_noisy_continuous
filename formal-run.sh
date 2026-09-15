@@ -39,6 +39,7 @@ export AGENT_FILE="$BBO_ROOT/dsh_rsi_agent/dsh_bbo_agent.py"
 export AGENT_IMPORT="dsh_rsi_agent.dsh_bbo_agent:DshBboAgent"
 export TRACE_REVIEW_PY="$BBO_ROOT/dsh_rsi_agent/trace_review.py"
 export CONFIG_ROOT="$BBO_ROOT/dsh_rsi_config"
+export CHECKPOINT_HELPER="$CONFIG_ROOT/version_checkpoint.py"
 export OFFICIAL_ROOT="$BBO_ROOT/official_rsi"
 export PROMPT_ROOT="$OFFICIAL_ROOT/infra/prompts"
 export ARB_PROMPT_TEMPLATE="$PROMPT_ROOT/autoresearch.j2"
@@ -49,7 +50,7 @@ export DEEPSEEK_ALLOW_AGENT_HOST="${DEEPSEEK_ALLOW_AGENT_HOST:-183.230.173.202}"
 export HARBOR_BIN="${HARBOR_BIN:-$HOME/.local/share/uv/tools/harbor/bin/harbor}"
 export HARBOR_PY="${HARBOR_PY:-$HOME/.local/share/uv/tools/harbor/bin/python}"
 export NODE_ROOT="${NODE_ROOT:-$HOME/.nvm/versions/node/v22.23.2}"
-export EXPECTED_AGENT_VERSION="0.5.0-official-autoresearch-review"
+export EXPECTED_AGENT_VERSION="0.6.0-official-autoresearch-checkpoint-guard"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "missing environment file: $ENV_FILE" >&2
@@ -88,6 +89,7 @@ for file in \
   "$TRACE_REVIEW_PY" \
   "$CONFIG_ROOT/bbo-no-cordis.yml" \
   "$CONFIG_ROOT/bbo-cordis-extra.yml" \
+  "$CHECKPOINT_HELPER" \
   "$ARB_PROMPT_TEMPLATE" \
   "$ARB_PROGRAM" \
   "$ARB_MOUNT_FILE" \
@@ -211,6 +213,8 @@ BASE_URL_SHA256=$(printf '%s' "$DEEPSEEK_BASE_URL" | sha256sum | awk '{print $1}
   echo "budget_py_sha256=$(sha256sum "$ARB_BUDGET_PY" | awk '{print $1}')"
   echo "agent_sha256=$(sha256sum "$AGENT_FILE" | awk '{print $1}')"
   echo "trace_review_sha256=$(sha256sum "$TRACE_REVIEW_PY" | awk '{print $1}')"
+  echo "version_checkpoint_helper_sha256=$(sha256sum "$CHECKPOINT_HELPER" | awk '{print $1}')"
+  echo "bookkeeping_checkpoint_guard=1"
   echo "no_cordis_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-no-cordis.yml" | awk '{print $1}')"
   echo "cordis_extra_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-cordis-extra.yml" | awk '{print $1}')"
 } > "$PROTOCOL_FILE"
@@ -261,6 +265,8 @@ assert metadata["condition"] == condition
 assert metadata["official_prompt_protocol"] is True
 assert metadata["rendered_autoresearch_prompt"] is True
 assert metadata["single_persistent_session"] is True
+assert metadata["bookkeeping_checkpoint_guard"] is True
+assert metadata["version_checkpoint_protocol"] == "atomic-snapshot-before-official-selfcheck"
 assert metadata["dsh_permission_mode"] == "danger-full-access"
 assert metadata["isolation_boundary"] == "harbor-docker-task-container"
 reward = trial["verifier_result"]["rewards"]["reward"]
@@ -274,6 +280,7 @@ trap - EXIT
 AGENT_AUTORESEARCH_AUDIT="$TRIAL/agent/autoresearch-audit.json"
 EXPERIMENT_LOG="$TRIAL/artifacts/app/methods/experiment_log.md"
 VERSIONS_DIR="$TRIAL/artifacts/app/methods/versions"
+VERSION_CHECKPOINT_STATE="$TRIAL/artifacts/app/methods/version_checkpoints.json"
 VERIFIER_SCORE_DETAILS="$TRIAL/verifier/score_details.json"
 VERIFIER_GRADE_DEBUG="$TRIAL/verifier/grade_debug.json"
 EFFECTIVE_CONFIG="$TRIAL/agent/effective-config.yml"
@@ -281,6 +288,7 @@ EFFECTIVE_CONFIG="$TRIAL/agent/effective-config.yml"
 for required in \
   "$EFFECTIVE_CONFIG" \
   "$AGENT_AUTORESEARCH_AUDIT" \
+  "$VERSION_CHECKPOINT_STATE" \
   "$VERIFIER_SCORE_DETAILS" \
   "$VERIFIER_GRADE_DEBUG"; do
   test -f "$required" || { echo "missing required formal artifact: $required" >&2; exit 1; }
@@ -323,12 +331,13 @@ for required in \
   "$BOOKKEEPING_AUDIT" \
   "$RUNTIME_AUDIT" \
   "$REVIEW_DIR/final_solver.py" \
+  "$REVIEW_DIR/version_checkpoints.json" \
   "$REVIEW_DIR/agent-trace.jsonl.zstd"; do
   test -f "$required" || { echo "missing review artifact: $required" >&2; exit 1; }
 done
 
-# These are descriptive audits, not selection gates. A model that snapshots
-# versions incompletely remains an observed result rather than being rerun.
+# Trace/runtime diagnostics are descriptive. Version checkpoint fidelity is a
+# hard pre-verifier contract in agent v0.6.0 and is rechecked here post-hoc.
 read -r TRACE_SELFCHECKS TRACE_FAILED TRACE_LLM_RETRIES TRACE_TOOL_ERRORS TRACE_BASH_NONZERO TRACE_CORDIS TRACE_SANDBOX < <(
   "$HARBOR_PY" - "$TRACE_AUDIT" <<'PY'
 import json, sys
@@ -354,7 +363,7 @@ if [ "$CONDITION" = "no-cordis" ] && [ "$TRACE_CORDIS" -ne 0 ]; then
   exit 1
 fi
 
-read -r BOOKKEEPING_STATUS LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE MISSING_SNAPSHOTS < <(
+read -r BOOKKEEPING_STATUS LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE CHECKPOINT_GUARD DECISION_COMPLETE MISSING_SNAPSHOTS HASH_MISMATCHES < <(
   "$HARBOR_PY" - "$BOOKKEEPING_AUDIT" <<'PY'
 import json, sys
 x=json.load(open(sys.argv[1]))
@@ -363,7 +372,10 @@ print(
     x.get('logged_version_count', 0),
     x.get('snapshot_version_count', 0),
     int(bool(x.get('snapshot_complete'))),
+    int(bool(x.get('checkpoint_guard_complete'))),
+    int(bool(x.get('decision_complete'))),
     x.get('missing_snapshot_count', len(x.get('missing_snapshot_versions', []))),
+    len(x.get('snapshot_hash_mismatches', [])),
 )
 PY
 )
@@ -383,18 +395,22 @@ print(
 PY
 )
 
-printf 'FORMAL_AUTORESEARCH_AUDIT status=%s logged_versions=%s snapshot_versions=%s snapshot_complete=%s missing_snapshots=%s\n' \
-  "$BOOKKEEPING_STATUS" "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE" "$MISSING_SNAPSHOTS"
+printf 'FORMAL_AUTORESEARCH_AUDIT status=%s logged_versions=%s snapshot_versions=%s snapshot_complete=%s checkpoint_guard_complete=%s decision_complete=%s missing_snapshots=%s hash_mismatches=%s\n' \
+  "$BOOKKEEPING_STATUS" "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE" "$CHECKPOINT_GUARD" "$DECISION_COMPLETE" "$MISSING_SNAPSHOTS" "$HASH_MISMATCHES"
 printf 'FORMAL_TRACE_AUDIT scored_selfchecks=%s failed_selfcheck_tool_calls=%s llm_retries=%s tool_api_errors=%s bash_nonzero_calls=%s cordis_calls=%s\n' \
   "$TRACE_SELFCHECKS" "$TRACE_FAILED" "$TRACE_LLM_RETRIES" "$TRACE_TOOL_ERRORS" "$TRACE_BASH_NONZERO" "$TRACE_CORDIS"
 printf 'FORMAL_RUNTIME_AUDIT status=%s elapsed_sec=%s budget_sec=%s margin_sec=%s utilization_pct=%s\n' \
   "$RUNTIME_STATUS" "$RUNTIME_ELAPSED" "$RUNTIME_BUDGET" "$RUNTIME_MARGIN" "$RUNTIME_UTIL"
 
-# Missing version snapshots are a prompt-following/bookkeeping issue, not a
-# verifier-validity failure. Make the incompleteness explicit without rerunning
-# or selecting on hidden results.
-if [ "$BOOKKEEPING_STATUS" = "WARN" ]; then
-  echo "FORMAL_BOOKKEEPING_WARN: snapshot_complete=0 missing_snapshots=$MISSING_SNAPSHOTS; formal verifier result remains valid" >&2
+# v0.6.0 makes historical version fidelity a harness contract. The custom
+# agent checks this before returning to Harbor, so a formal result should never
+# reach this point with incomplete/mutated snapshots. Fail closed if it does.
+if [ "$SNAPSHOT_COMPLETE" -ne 1 ] || [ "$CHECKPOINT_GUARD" -ne 1 ] || [ "$HASH_MISMATCHES" -ne 0 ]; then
+  echo "FORMAL_BOOKKEEPING_AUDIT_FAIL snapshot_complete=$SNAPSHOT_COMPLETE checkpoint_guard_complete=$CHECKPOINT_GUARD missing_snapshots=$MISSING_SNAPSHOTS hash_mismatches=$HASH_MISMATCHES" >&2
+  exit 1
+fi
+if [ "$DECISION_COMPLETE" -ne 1 ]; then
+  echo "FORMAL_BOOKKEEPING_DECISION_WARN: some evaluated versions were not explicitly marked kept/reverted/submitted; snapshots remain complete" >&2
 fi
 
 # This warning is post-hoc telemetry from the official verifier. It is not fed
@@ -421,6 +437,7 @@ printf 'VERSION_HISTORY=%s\n' "$VERSION_HISTORY"
 printf 'EXPERIMENT_LOG=%s\n' "$REVIEW_DIR/experiment_log.md"
 printf 'FINAL_SOLVER=%s\n' "$REVIEW_DIR/final_solver.py"
 printf 'VERSIONS_DIR=%s\n' "$REVIEW_DIR/versions"
+printf 'VERSION_CHECKPOINTS=%s\n' "$REVIEW_DIR/version_checkpoints.json"
 printf 'AGENT_TRACE_FILE=%s\n' "$REVIEW_DIR/agent-trace.jsonl.zstd"
 printf 'TRACE_AUDIT=%s\n' "$TRACE_AUDIT"
 printf 'BOOKKEEPING_AUDIT=%s\n' "$BOOKKEEPING_AUDIT"

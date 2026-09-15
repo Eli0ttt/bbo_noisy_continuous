@@ -26,8 +26,66 @@ class DshBboAgent(BaseAgent):
     _CLI = "/opt/deepseek-harness/apps/cli/src/bin.ts"
     _NO_CORDIS_PATCH = "/opt/dsh-config/bbo-no-cordis.yml"
     _CORDIS_PATCH = "/opt/dsh-config/bbo-cordis-extra.yml"
-    _VERSION = "0.5.0-official-autoresearch-review"
+    _CHECKPOINT_HELPER = "/opt/dsh-config/version_checkpoint.py"
+    _VERSION = "0.6.0-official-autoresearch-checkpoint-guard"
     _PROMPT_PLACEHOLDER = "{{ instruction }}"
+    _BOOKKEEPING_ADDENDUM = r"""
+
+---
+
+## Harness bookkeeping enforcement for the official version/log requirement
+
+The official autoresearch instruction above already requires an experiment log and a
+snapshot for every recorded `v<N>`.  This harness enforces that bookkeeping without
+choosing your experiments, your version count, or your keep/revert decisions.
+
+For every candidate that you decide to name as a version `vN`, do **not** run the
+versioned evaluation with a bare `python /app/selfcheck.py`.  Instead, before any
+further edit to `/app/methods/main/solver.py`, run:
+
+```bash
+python /opt/dsh-config/version_checkpoint.py evaluate --version vN --parent vM --description "brief hypothesis/change"
+```
+
+This command snapshots the current `/app/methods/main/` atomically to
+`/app/methods/versions/vN/` **before** running the unmodified official
+`/app/selfcheck.py --json`, then records the visible score in
+`/app/methods/experiment_log.md`.  The command is synchronous, so you cannot edit the
+solver between snapshot and evaluation.  If you would otherwise use a shell timeout for a
+slow candidate, you may add `--timeout SEC`; the helper does not impose one by default.
+
+After you see the score and decide what to do, record the decision:
+
+```bash
+python /opt/dsh-config/version_checkpoint.py decide --version vN --status kept
+python /opt/dsh-config/version_checkpoint.py decide --version vN --status reverted
+python /opt/dsh-config/version_checkpoint.py decide --version vN --status submitted
+```
+
+If you need to restore a previously snapshotted version, use:
+
+```bash
+python /opt/dsh-config/version_checkpoint.py restore --version vM
+```
+
+Important rules:
+
+- Version numbering and the number/frequency of experiments remain entirely your decision.
+- Direct `selfcheck.py` calls are allowed for unversioned diagnostics, but a diagnostic
+  must not later be called `vN` unless it is re-evaluated through the `evaluate` command.
+- Do not manually create/overwrite `/app/methods/versions/vN` and do not bulk-rewrite the
+  version table in `experiment_log.md`; the helper manages those artifacts.
+- A failed/timed-out versioned selfcheck is still snapshotted and recorded, so failed
+  experiments remain auditable.
+- Before finishing, mark exactly one final version `submitted`; if you intentionally submit
+  the untouched baseline, `python /opt/dsh-config/version_checkpoint.py decide --version v0 --status submitted` is allowed.
+- The harness rejects final handoff if a recorded version lacks its helper manifest or
+  immutable solver snapshot, if a version snapshot was mutated, or if the final solver does
+  not match the single submitted snapshot.
+
+This guard changes only research bookkeeping.  It does not change the task, visible data,
+selfcheck implementation, hidden verifier, scoring, or your autonomous research choices.
+"""
 
     def __init__(
         self,
@@ -189,12 +247,14 @@ class DshBboAgent(BaseAgent):
             )
 
         template = self._load_official_template()
-        rendered = template.replace(
+        official_rendered = template.replace(
             self._PROMPT_PLACEHOLDER,
             instruction.rstrip("\n"),
         )
+        rendered = official_rendered + self._BOOKKEEPING_ADDENDUM
         template_sha = hashlib.sha256(template.encode("utf-8")).hexdigest()
         task_sha = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+        addendum_sha = hashlib.sha256(self._BOOKKEEPING_ADDENDUM.encode("utf-8")).hexdigest()
         rendered_sha = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
         self._write_required_log("rendered-prompt.sha256", rendered_sha + "\n")
         self._write_required_log(
@@ -204,8 +264,9 @@ class DshBboAgent(BaseAgent):
                     f"template_path={self._prompt_template_path}",
                     f"template_sha256={template_sha}",
                     f"task_sha256={task_sha}",
+                    f"bookkeeping_addendum_sha256={addendum_sha}",
                     f"rendered_sha256={rendered_sha}",
-                    "rendering=literal replacement of official {{ instruction }} placeholder",
+                    "rendering=official template literal replacement + bookkeeping guard addendum",
                     "",
                 ]
             ),
@@ -221,6 +282,9 @@ class DshBboAgent(BaseAgent):
             "official_prompt_protocol": True,
             "rendered_autoresearch_prompt": True,
             "single_persistent_session": True,
+            "bookkeeping_checkpoint_guard": True,
+            "version_checkpoint_helper": self._CHECKPOINT_HELPER,
+            "version_checkpoint_protocol": "atomic-snapshot-before-official-selfcheck",
             "workspace": "/app",
             "dsh_permission_mode": "danger-full-access",
             "isolation_boundary": "harbor-docker-task-container",
@@ -249,6 +313,7 @@ class DshBboAgent(BaseAgent):
             f"test -x {shlex.quote(self._NODE)}",
             f"test -f {shlex.quote(self._CLI)}",
             f"test -f {shlex.quote(self._NO_CORDIS_PATCH)}",
+            f"test -f {shlex.quote(self._CHECKPOINT_HELPER)}",
             "test -f /app/AUTORESEARCH.md",
             "test -f /app/TASK.md",
             "test -f /app/budget.py",
@@ -301,70 +366,45 @@ class DshBboAgent(BaseAgent):
             raise RuntimeError("failed to read /app/TASK.md during setup")
         self._task_instruction_on_disk = task_read.stdout or ""
 
+        # Initialize an immutable v0 baseline snapshot and helper-managed
+        # experiment log before the model starts.  This does not run a visible
+        # selfcheck and does not provide any extra task information.
+        checkpoint_init = await environment.exec(
+            f"python3 {shlex.quote(self._CHECKPOINT_HELPER)} init",
+            cwd="/app",
+            env=self._runtime_env(),
+            timeout_sec=60,
+        )
+        self._write_optional_log("checkpoint-init.stdout.log", checkpoint_init.stdout)
+        self._write_optional_log("checkpoint-init.stderr.log", checkpoint_init.stderr)
+        if checkpoint_init.return_code != 0:
+            raise RuntimeError("failed to initialize version checkpoint guard")
+
     async def _audit_research_bookkeeping(
         self,
         environment: BaseEnvironment,
     ) -> dict[str, Any]:
-        command = r'''python3 - <<'PY'
-import json
-import re
-from pathlib import Path
-
-root = Path('/app/methods')
-versions = root / 'versions'
-all_snapshot_dirs = sorted(
-    [p.name for p in versions.iterdir() if p.is_dir()]
-) if versions.is_dir() else []
-canonical_snapshot_dirs = sorted(
-    [name for name in all_snapshot_dirs if re.fullmatch(r'v[0-9]+', name)],
-    key=lambda x: int(x[1:]),
-)
-noncanonical_snapshot_dirs = sorted(
-    [name for name in all_snapshot_dirs if name not in canonical_snapshot_dirs]
-)
-log = root / 'experiment_log.md'
-solver = root / 'main' / 'solver.py'
-log_text = log.read_text(encoding='utf-8', errors='replace') if log.is_file() else ''
-logged_versions = []
-for match in re.finditer(r'^##\s+(v[0-9]+)\b', log_text, flags=re.MULTILINE):
-    version = match.group(1)
-    if version not in logged_versions:
-        logged_versions.append(version)
-# v0 is the shipped baseline; snapshot completeness concerns agent-created versions.
-logged_candidate_versions = [v for v in logged_versions if v != 'v0']
-missing = [v for v in logged_candidate_versions if v not in canonical_snapshot_dirs]
-extra = [v for v in canonical_snapshot_dirs if v not in logged_candidate_versions]
-print(json.dumps({
-    'final_solver_exists': solver.is_file(),
-    'experiment_log_exists': log.is_file(),
-    'experiment_log_nonempty': log.is_file() and log.stat().st_size > 0,
-    'versions_dir_exists': versions.is_dir(),
-    'logged_versions': logged_versions,
-    'logged_candidate_versions': logged_candidate_versions,
-    'logged_version_count': len(logged_candidate_versions),
-    'snapshot_dirs': all_snapshot_dirs,
-    'canonical_snapshot_versions': canonical_snapshot_dirs,
-    'snapshot_version_count': len(canonical_snapshot_dirs),
-    'noncanonical_snapshot_dirs': noncanonical_snapshot_dirs,
-    'missing_snapshot_versions': missing,
-    'extra_snapshot_versions': extra,
-    'snapshot_complete': bool(logged_candidate_versions) and not missing and not noncanonical_snapshot_dirs,
-}, sort_keys=True))
-PY'''
+        # The checkpoint helper is the source of truth for version fidelity.
+        # It verifies that the helper-managed log, manifest, snapshot dirs and
+        # recorded solver hashes agree.  This audit runs before Harbor is
+        # allowed to hand the final artifact to the hidden verifier.
         audit = await environment.exec(
-            command,
+            f"python3 {shlex.quote(self._CHECKPOINT_HELPER)} audit --json",
             cwd="/app",
             env=self._runtime_env(),
             timeout_sec=60,
         )
         self._write_optional_log("autoresearch-audit.stderr.log", audit.stderr)
         self._write_required_log("autoresearch-audit.json", audit.stdout)
-        if audit.return_code != 0:
-            raise RuntimeError("failed to audit autoresearch bookkeeping artifacts")
         try:
             parsed = json.loads(audit.stdout or "{}")
         except json.JSONDecodeError as exc:
-            raise RuntimeError("invalid JSON from autoresearch bookkeeping audit") from exc
+            raise RuntimeError("invalid JSON from version checkpoint audit") from exc
+        if audit.return_code != 0 or not parsed.get("checkpoint_guard_complete", False):
+            raise RuntimeError(
+                "version checkpoint guard rejected final handoff: every recorded v<N> "
+                "must have a matching immutable helper snapshot before hidden verification"
+            )
         return parsed
 
     async def run(
@@ -375,7 +415,8 @@ PY'''
     ) -> None:
         # The historical custom adapter incorrectly forwarded only the task
         # instruction.  Render the official autoresearch.j2 explicitly so DSH
-        # receives the same research loop + task section expected by RSI-Exam.
+        # receives the official research loop + task section, followed only by
+        # a harness bookkeeping guard that enforces the prompt's own version/log requirement.
         rendered_prompt = self._render_official_prompt(instruction)
 
         # One persistent DSH conversation is one outer research rollout.  Do
