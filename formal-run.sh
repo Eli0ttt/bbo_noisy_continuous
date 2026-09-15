@@ -37,6 +37,7 @@ export ENV_FILE="${ENV_FILE:-$BBO_ROOT/env/dsh_bbo_experiment.env}"
 export JOBS_DIR="${JOBS_DIR:-$BBO_ROOT/dsh_rsi_jobs}"
 export AGENT_FILE="$BBO_ROOT/dsh_rsi_agent/dsh_bbo_agent.py"
 export AGENT_IMPORT="dsh_rsi_agent.dsh_bbo_agent:DshBboAgent"
+export TRACE_REVIEW_PY="$BBO_ROOT/dsh_rsi_agent/trace_review.py"
 export CONFIG_ROOT="$BBO_ROOT/dsh_rsi_config"
 export OFFICIAL_ROOT="$BBO_ROOT/official_rsi"
 export PROMPT_ROOT="$OFFICIAL_ROOT/infra/prompts"
@@ -48,7 +49,7 @@ export DEEPSEEK_ALLOW_AGENT_HOST="${DEEPSEEK_ALLOW_AGENT_HOST:-183.230.173.202}"
 export HARBOR_BIN="${HARBOR_BIN:-$HOME/.local/share/uv/tools/harbor/bin/harbor}"
 export HARBOR_PY="${HARBOR_PY:-$HOME/.local/share/uv/tools/harbor/bin/python}"
 export NODE_ROOT="${NODE_ROOT:-$HOME/.nvm/versions/node/v22.23.2}"
-export EXPECTED_AGENT_VERSION="0.4.0-official-autoresearch-shellfix"
+export EXPECTED_AGENT_VERSION="0.5.0-official-autoresearch-review"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "missing environment file: $ENV_FILE" >&2
@@ -84,6 +85,7 @@ for file in \
   "$OFFICIAL_TASK_ROOT/task.toml" \
   "$OFFICIAL_TASK_ROOT/instruction.md" \
   "$AGENT_FILE" \
+  "$TRACE_REVIEW_PY" \
   "$CONFIG_ROOT/bbo-no-cordis.yml" \
   "$CONFIG_ROOT/bbo-cordis-extra.yml" \
   "$ARB_PROMPT_TEMPLATE" \
@@ -208,6 +210,7 @@ BASE_URL_SHA256=$(printf '%s' "$DEEPSEEK_BASE_URL" | sha256sum | awk '{print $1}
   echo "mount_yaml_sha256=$(sha256sum "$ARB_MOUNT_FILE" | awk '{print $1}')"
   echo "budget_py_sha256=$(sha256sum "$ARB_BUDGET_PY" | awk '{print $1}')"
   echo "agent_sha256=$(sha256sum "$AGENT_FILE" | awk '{print $1}')"
+  echo "trace_review_sha256=$(sha256sum "$TRACE_REVIEW_PY" | awk '{print $1}')"
   echo "no_cordis_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-no-cordis.yml" | awk '{print $1}')"
   echo "cordis_extra_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-cordis-extra.yml" | awk '{print $1}')"
 } > "$PROTOCOL_FILE"
@@ -268,246 +271,149 @@ PY
 mv "$PROTOCOL_FILE" "$TRIAL/formal_protocol.txt"
 trap - EXIT
 
-AGENT_STDOUT="$TRIAL/agent/dsh.stdout.log"
-AGENT_STDERR="$TRIAL/agent/dsh.stderr.log"
-EFFECTIVE_CONFIG="$TRIAL/agent/effective-config.yml"
 AGENT_AUTORESEARCH_AUDIT="$TRIAL/agent/autoresearch-audit.json"
 EXPERIMENT_LOG="$TRIAL/artifacts/app/methods/experiment_log.md"
 VERSIONS_DIR="$TRIAL/artifacts/app/methods/versions"
 VERIFIER_SCORE_DETAILS="$TRIAL/verifier/score_details.json"
 VERIFIER_GRADE_DEBUG="$TRIAL/verifier/grade_debug.json"
+EFFECTIVE_CONFIG="$TRIAL/agent/effective-config.yml"
 
 for required in \
-  "$AGENT_STDOUT" \
-  "$AGENT_STDERR" \
   "$EFFECTIVE_CONFIG" \
   "$AGENT_AUTORESEARCH_AUDIT" \
-  "$VERIFIER_SCORE_DETAILS"; do
+  "$VERIFIER_SCORE_DETAILS" \
+  "$VERIFIER_GRADE_DEBUG"; do
   test -f "$required" || { echo "missing required formal artifact: $required" >&2; exit 1; }
 done
-
-# The official prompt asks the model to use selfcheck/log/versioning, but those
-# are agent research decisions, not extra hard benchmark validity gates.  A
-# model that stops early or fails to improve should remain an observed result,
-# not be silently rerun until it behaves better.  Record bookkeeping instead
-# of requiring an arbitrary minimum version count.
-VERSION_DIRS=()
-if [ -d "$VERSIONS_DIR" ]; then
-  mapfile -t VERSION_DIRS < <(find "$VERSIONS_DIR" -mindepth 1 -maxdepth 1 -type d -name 'v*' -print | sort -V)
-fi
 
 mapfile -t TRACE_FILES < <(
   find "$TRIAL/artifacts/logs/artifacts/dsh-home/sessions" \
     -type f -name 'session.jsonl.zstd' -print 2>/dev/null | sort
 )
-if [ "${#TRACE_FILES[@]}" -lt 1 ]; then
-  echo "no structured DSH session trace found" >&2
+if [ "${#TRACE_FILES[@]}" -ne 1 ]; then
+  echo "expected exactly one structured DSH session trace, found ${#TRACE_FILES[@]}" >&2
   exit 1
 fi
 AGENT_TRACE_FILE="${TRACE_FILES[0]}"
-TRACE_AUDIT="$TRIAL/agent/trace-audit.json"
 
-# Audit the structured DSH trajectory.  Do not impose a minimum number of
-# selfchecks/versions: those are agent decisions under the official protocol.
-# Fail only on the known infrastructure bug where DSH's nested sandbox blocks
-# bash before the requested command can execute.
-"$HARBOR_PY" - "$AGENT_TRACE_FILE" "$TRACE_AUDIT" <<'PY'
-import collections
-import json
-import subprocess
-import sys
-from pathlib import Path
+# Curated human-review surface. The raw Harbor tree remains intact for
+# reproducibility/upload; review/ contains only the evidence normally needed
+# for manual inspection.
+REVIEW_DIR="$JOB_ROOT/review"
+"$HARBOR_PY" "$TRACE_REVIEW_PY" \
+  --trial "$TRIAL" \
+  --job-name "$JOB_NAME" \
+  --condition "$CONDITION" \
+  --run-number "$RUN_NUM" \
+  --trace "$AGENT_TRACE_FILE" \
+  --out-dir "$REVIEW_DIR"
 
-trace_path = sys.argv[1]
-out_path = Path(sys.argv[2])
+REVIEW_SUMMARY="$REVIEW_DIR/summary.json"
+AGENT_ACTIONS="$REVIEW_DIR/agent-actions.md"
+VERSION_HISTORY="$REVIEW_DIR/version-history.csv"
+TRACE_AUDIT="$REVIEW_DIR/trace-audit.json"
+BOOKKEEPING_AUDIT="$REVIEW_DIR/bookkeeping-audit.json"
+RUNTIME_AUDIT="$REVIEW_DIR/runtime-audit.json"
 
-calls = {}
-results = {}
-tool_counts = collections.Counter()
-
-proc = subprocess.Popen(
-    ["zstdcat", trace_path],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    text=True,
-)
-assert proc.stdout is not None
-for line in proc.stdout:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if not isinstance(obj, dict):
-        continue
-    typ = obj.get("type")
-    d = obj.get("data")
-    if not isinstance(d, dict):
-        continue
-    if typ == "tool/call":
-        name = str(d.get("name", ""))
-        call_id = str(d.get("callId", ""))
-        raw_args = d.get("arguments", "{}")
-        try:
-            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-        except Exception:
-            args = {"_raw": raw_args}
-        if not isinstance(args, dict):
-            args = {"_raw": args}
-        calls[call_id] = {"name": name, "args": args}
-        tool_counts[name] += 1
-    elif typ == "tool/result":
-        # DSH session JSONL stores tool results below data.message.
-        # Keep a fallback for older/alternate encodings as well.
-        message = d.get("message") if isinstance(d.get("message"), dict) else d
-        source = message.get("source")
-        content = message.get("content")
-        if not isinstance(source, dict) or not isinstance(content, list):
-            continue
-        call_id = str(source.get("callId", ""))
-        is_error = False
-        texts = []
-        for item in content:
-            if not isinstance(item, dict) or item.get("type") != "tool-result":
-                continue
-            is_error = is_error or bool(item.get("isError"))
-            nested = item.get("content")
-            if isinstance(nested, list):
-                for part in nested:
-                    if isinstance(part, dict) and isinstance(part.get("text"), str):
-                        texts.append(part["text"])
-            data = item.get("data")
-            if isinstance(data, dict) and isinstance(data.get("text"), str):
-                texts.append(data["text"])
-        results[call_id] = {"is_error": is_error, "text": "\n".join(texts)}
-
-stderr = proc.stderr.read() if proc.stderr is not None else ""
-rc = proc.wait()
-if rc != 0:
-    raise SystemExit(f"zstdcat failed with code {rc}: {stderr}")
-
-selfchecks = []
-cordis_calls = []
-sandbox_backend_failures = []
-for call_id, call in calls.items():
-    name = call["name"]
-    args = call["args"]
-    rendered_args = json.dumps(args, sort_keys=True, ensure_ascii=False)
-    result = results.get(call_id, {"is_error": True, "text": ""})
-    text = result.get("text", "") or ""
-    if name == "bash" and "selfcheck" in rendered_args:
-        selfchecks.append(
-            {
-                "call_id": call_id,
-                "is_error": bool(result.get("is_error", True)),
-                "score_signal": (
-                    "oracle_normalized_auc70_final30" in text
-                    or "visible oracle-normalized score" in text
-                ),
-            }
-        )
-    if (
-        "no sandbox backend is usable" in text
-        or "sandbox escalation to \"danger-full-access\" requires approval" in text
-    ):
-        sandbox_backend_failures.append(call_id)
-    if "cordis" in name.lower() or "cordis" in rendered_args.lower():
-        cordis_calls.append(call_id)
-
-successful_selfchecks = sum(1 for x in selfchecks if not x["is_error"])
-score_signal_selfchecks = sum(1 for x in selfchecks if x["score_signal"])
-audit = {
-    "trace_path": trace_path,
-    "tool_counts": dict(sorted(tool_counts.items())),
-    "selfcheck_calls": len(selfchecks),
-    "successful_selfcheck_calls": successful_selfchecks,
-    "selfchecks_with_score_signal": score_signal_selfchecks,
-    "cordis_related_calls": len(set(cordis_calls)),
-    "sandbox_backend_failures": len(set(sandbox_backend_failures)),
-}
-out_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-print(json.dumps(audit, sort_keys=True))
-if sandbox_backend_failures:
-    raise SystemExit(
-        "AUTORESEARCH_TRACE_AUDIT_FAIL: DSH nested-sandbox infrastructure "
-        "blocked tool execution"
-    )
-PY
-
-# Cross-check the agent-side bookkeeping audit without inventing a minimum
-# number of versions/selfchecks beyond the official protocol.
-"$HARBOR_PY" - "$AGENT_AUTORESEARCH_AUDIT" <<'PY'
-import json
-import sys
-from pathlib import Path
-x = json.loads(Path(sys.argv[1]).read_text())
-assert x["final_solver_exists"] is True
-print(
-    "FORMAL_AUTORESEARCH_BOOKKEEPING_AUDIT "
-    f"experiment_log={int(bool(x.get('experiment_log_nonempty')))} "
-    f"versions={int(x.get('version_count', 0))}"
-)
-PY
-
-TRACE_ARCHIVE="$JOB_ROOT/${JOB_NAME}.agent-trace.tar.zst"
-TRACE_MANIFEST="$JOB_ROOT/${JOB_NAME}.agent-trace.manifest.txt"
-ARCHIVE_INPUTS=(
-  "agent/dsh.stdout.log"
-  "agent/dsh.stderr.log"
-  "agent/effective-config.yml"
-  "agent/rendered-prompt.sha256"
-  "agent/prompt-source.txt"
-  "agent/autoresearch-audit.json"
-  "agent/trace-audit.json"
-  "artifacts/app/methods"
-  "result.json"
-  "formal_protocol.txt"
-  "verifier/reward.json"
-  "verifier/reward.txt"
-  "verifier/score_details.json"
-)
-if [ -f "$TRIAL/verifier/grade_debug.json" ]; then
-  ARCHIVE_INPUTS+=("verifier/grade_debug.json")
-fi
-if [ -f "$TRIAL/verifier/test-stdout.txt" ]; then
-  ARCHIVE_INPUTS+=("verifier/test-stdout.txt")
-fi
-for trace in "${TRACE_FILES[@]}"; do
-  ARCHIVE_INPUTS+=("${trace#"$TRIAL/"}")
+for required in \
+  "$REVIEW_SUMMARY" \
+  "$AGENT_ACTIONS" \
+  "$VERSION_HISTORY" \
+  "$TRACE_AUDIT" \
+  "$BOOKKEEPING_AUDIT" \
+  "$RUNTIME_AUDIT" \
+  "$REVIEW_DIR/final_solver.py" \
+  "$REVIEW_DIR/agent-trace.jsonl.zstd"; do
+  test -f "$required" || { echo "missing review artifact: $required" >&2; exit 1; }
 done
 
-tar --zstd -C "$TRIAL" -cf "$TRACE_ARCHIVE" "${ARCHIVE_INPUTS[@]}"
-TRACE_ARCHIVE_SHA256=$(sha256sum "$TRACE_ARCHIVE" | awk '{print $1}')
-{
-  echo "job_name=$JOB_NAME"
-  echo "condition=$CONDITION"
-  echo "run_number=$RUN_NUM"
-  echo "agent_version=$EXPECTED_AGENT_VERSION"
-  echo "archive_sha256=$TRACE_ARCHIVE_SHA256"
-  echo "trace_count=${#TRACE_FILES[@]}"
-  echo "version_count=${#VERSION_DIRS[@]}"
-  echo
-  echo "===== archive contents ====="
-  tar --zstd -tf "$TRACE_ARCHIVE"
-} > "$TRACE_MANIFEST"
+# These are descriptive audits, not selection gates. A model that snapshots
+# versions incompletely remains an observed result rather than being rerun.
+read -r TRACE_SELFCHECKS TRACE_FAILED TRACE_CORDIS TRACE_SANDBOX < <(
+  "$HARBOR_PY" - "$TRACE_AUDIT" <<'PY'
+import json, sys
+x=json.load(open(sys.argv[1]))
+print(
+    x.get('scored_selfcheck_executions', 0),
+    x.get('failed_selfcheck_tool_calls', 0),
+    x.get('cordis_related_calls', 0),
+    x.get('sandbox_backend_failures', 0),
+)
+PY
+)
 
-TRACE_SELFCHECKS=$("$HARBOR_PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["successful_selfcheck_calls"])' "$TRACE_AUDIT")
-printf 'FORMAL_INFRASTRUCTURE_AUDIT_PASS successful_selfchecks=%s versions=%s\n' "$TRACE_SELFCHECKS" "${#VERSION_DIRS[@]}"
+if [ "$TRACE_SANDBOX" -ne 0 ]; then
+  echo "FORMAL_INFRASTRUCTURE_AUDIT_FAIL sandbox_backend_failures=$TRACE_SANDBOX" >&2
+  exit 1
+fi
+if [ "$CONDITION" = "no-cordis" ] && [ "$TRACE_CORDIS" -ne 0 ]; then
+  echo "FORMAL_TREATMENT_AUDIT_FAIL unexpected_cordis_calls=$TRACE_CORDIS" >&2
+  exit 1
+fi
+
+read -r LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE < <(
+  "$HARBOR_PY" - "$BOOKKEEPING_AUDIT" <<'PY'
+import json, sys
+x=json.load(open(sys.argv[1]))
+print(
+    x.get('logged_version_count', 0),
+    x.get('snapshot_version_count', 0),
+    int(bool(x.get('snapshot_complete'))),
+)
+PY
+)
+
+read -r RUNTIME_STATUS RUNTIME_ELAPSED RUNTIME_BUDGET RUNTIME_MARGIN RUNTIME_UTIL < <(
+  "$HARBOR_PY" - "$RUNTIME_AUDIT" <<'PY'
+import json, sys
+x=json.load(open(sys.argv[1]))
+u=x.get('utilization')
+print(
+    x.get('status', 'UNKNOWN'),
+    x.get('elapsed_sec'),
+    x.get('time_budget_sec'),
+    x.get('margin_sec'),
+    'NA' if u is None else f'{100*u:.2f}',
+)
+PY
+)
+
+printf 'FORMAL_AUTORESEARCH_AUDIT logged_versions=%s snapshot_versions=%s snapshot_complete=%s\n' \
+  "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE"
+printf 'FORMAL_TRACE_AUDIT scored_selfchecks=%s failed_selfcheck_tool_calls=%s cordis_calls=%s\n' \
+  "$TRACE_SELFCHECKS" "$TRACE_FAILED" "$TRACE_CORDIS"
+printf 'FORMAL_RUNTIME_AUDIT status=%s elapsed_sec=%s budget_sec=%s margin_sec=%s utilization_pct=%s\n' \
+  "$RUNTIME_STATUS" "$RUNTIME_ELAPSED" "$RUNTIME_BUDGET" "$RUNTIME_MARGIN" "$RUNTIME_UTIL"
+
+# This warning is post-hoc telemetry from the official verifier. It is not fed
+# back to the research agent, which avoids hidden-runtime feedback becoming an
+# outer-loop tuning signal.
+if [ "$RUNTIME_STATUS" = "WARN" ]; then
+  echo "FORMAL_RUNTIME_MARGIN_WARN: verifier completed, but runtime headroom is thin" >&2
+fi
+
+REVIEW_ARCHIVE="$JOB_ROOT/${JOB_NAME}.review.tar.zst"
+tar --zstd -C "$JOB_ROOT" -cf "$REVIEW_ARCHIVE" review
+REVIEW_ARCHIVE_SHA256=$(sha256sum "$REVIEW_ARCHIVE" | awk '{print $1}')
+
+printf 'FORMAL_INFRASTRUCTURE_AUDIT_PASS scored_selfchecks=%s logged_versions=%s\n' \
+  "$TRACE_SELFCHECKS" "$LOGGED_VERSIONS"
 printf 'FORMAL_RUN_PASS=%s\n' "$JOB_NAME"
-printf 'JOB_RESULT=%s\n' "$JOB_ROOT/result.json"
-printf 'TRIAL_RESULT=%s\n' "$TRIAL/result.json"
-printf 'FINAL_SOLVER=%s\n' "$TRIAL/artifacts/app/methods/main/solver.py"
-printf 'EXPERIMENT_LOG=%s\n' "$EXPERIMENT_LOG"
-printf 'VERSIONS_DIR=%s\n' "$VERSIONS_DIR"
-printf 'VERIFIER_SCORE_DETAILS=%s\n' "$VERIFIER_SCORE_DETAILS"
-printf 'AGENT_TRACE_FILE=%s\n' "$AGENT_TRACE_FILE"
-printf 'AGENT_TRACE_ARCHIVE=%s\n' "$TRACE_ARCHIVE"
-printf 'AGENT_TRACE_ARCHIVE_SHA256=%s\n' "$TRACE_ARCHIVE_SHA256"
-printf 'AGENT_TRACE_MANIFEST=%s\n' "$TRACE_MANIFEST"
-printf 'AGENT_TRACE_AUDIT=%s\n' "$TRACE_AUDIT"
-printf 'FULL_DSH_STDOUT=%s\n' "$AGENT_STDOUT"
-printf 'FULL_DSH_STDERR=%s\n' "$AGENT_STDERR"
-printf 'EFFECTIVE_DSH_CONFIG=%s\n' "$EFFECTIVE_CONFIG"
+printf 'RAW_JOB_DIR=%s\n' "$JOB_ROOT"
+printf 'RAW_TRIAL_DIR=%s\n' "$TRIAL"
+printf 'REVIEW_DIR=%s\n' "$REVIEW_DIR"
+printf 'REVIEW_README=%s\n' "$REVIEW_DIR/README.md"
+printf 'REVIEW_SUMMARY=%s\n' "$REVIEW_SUMMARY"
+printf 'AGENT_ACTIONS=%s\n' "$AGENT_ACTIONS"
+printf 'VERSION_HISTORY=%s\n' "$VERSION_HISTORY"
+printf 'EXPERIMENT_LOG=%s\n' "$REVIEW_DIR/experiment_log.md"
+printf 'FINAL_SOLVER=%s\n' "$REVIEW_DIR/final_solver.py"
+printf 'VERSIONS_DIR=%s\n' "$REVIEW_DIR/versions"
+printf 'AGENT_TRACE_FILE=%s\n' "$REVIEW_DIR/agent-trace.jsonl.zstd"
+printf 'TRACE_AUDIT=%s\n' "$TRACE_AUDIT"
+printf 'BOOKKEEPING_AUDIT=%s\n' "$BOOKKEEPING_AUDIT"
+printf 'RUNTIME_AUDIT=%s\n' "$RUNTIME_AUDIT"
+printf 'VERIFIER_SCORE_DETAILS=%s\n' "$REVIEW_DIR/verifier-score-details.json"
+printf 'REVIEW_ARCHIVE=%s\n' "$REVIEW_ARCHIVE"
+printf 'REVIEW_ARCHIVE_SHA256=%s\n' "$REVIEW_ARCHIVE_SHA256"
 df -h "$BBO_ROOT" /tmp

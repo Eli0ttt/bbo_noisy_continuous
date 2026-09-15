@@ -26,7 +26,7 @@ class DshBboAgent(BaseAgent):
     _CLI = "/opt/deepseek-harness/apps/cli/src/bin.ts"
     _NO_CORDIS_PATCH = "/opt/dsh-config/bbo-no-cordis.yml"
     _CORDIS_PATCH = "/opt/dsh-config/bbo-cordis-extra.yml"
-    _VERSION = "0.4.0-official-autoresearch-shellfix"
+    _VERSION = "0.5.0-official-autoresearch-review"
     _PROMPT_PLACEHOLDER = "{{ instruction }}"
 
     def __init__(
@@ -123,9 +123,23 @@ class DshBboAgent(BaseAgent):
             ]
         )
 
-    def _write_log(self, name: str, content: str | None) -> None:
+    def _write_required_log(self, name: str, content: str | None) -> None:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         (self.logs_dir / name).write_text(content or "", encoding="utf-8")
+
+    def _write_optional_log(self, name: str, content: str | None) -> None:
+        """Write diagnostic output only when it contains useful content.
+
+        Older runs created many zero-byte stderr/handoff files.  Harbor already
+        records trial status, so empty diagnostics add review clutter without
+        adding evidence.
+        """
+        if not content:
+            return
+        if not content.strip():
+            return
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        (self.logs_dir / name).write_text(content, encoding="utf-8")
 
     @staticmethod
     def _normalize_text(text: str) -> str:
@@ -182,8 +196,8 @@ class DshBboAgent(BaseAgent):
         template_sha = hashlib.sha256(template.encode("utf-8")).hexdigest()
         task_sha = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
         rendered_sha = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
-        self._write_log("rendered-prompt.sha256", rendered_sha + "\n")
-        self._write_log(
+        self._write_required_log("rendered-prompt.sha256", rendered_sha + "\n")
+        self._write_required_log(
             "prompt-source.txt",
             "\n".join(
                 [
@@ -214,7 +228,15 @@ class DshBboAgent(BaseAgent):
             "experiment_log_exists": self._bookkeeping_audit.get(
                 "experiment_log_exists", False
             ),
-            "version_count": self._bookkeeping_audit.get("version_count", 0),
+            "logged_version_count": self._bookkeeping_audit.get(
+                "logged_version_count", 0
+            ),
+            "snapshot_version_count": self._bookkeeping_audit.get(
+                "snapshot_version_count", 0
+            ),
+            "snapshot_complete": self._bookkeeping_audit.get(
+                "snapshot_complete", False
+            ),
         }
 
     async def setup(self, environment: BaseEnvironment) -> None:
@@ -243,8 +265,8 @@ class DshBboAgent(BaseAgent):
             env=self._runtime_env(),
             timeout_sec=300,
         )
-        self._write_log("effective-config.yml", result.stdout)
-        self._write_log("setup.stderr.log", result.stderr)
+        self._write_required_log("effective-config.yml", result.stdout)
+        self._write_optional_log("setup.stderr.log", result.stderr)
         if result.return_code != 0:
             raise RuntimeError(
                 "DeepSeek Harness setup/config audit failed; "
@@ -274,7 +296,7 @@ class DshBboAgent(BaseAgent):
             env=self._runtime_env(),
             timeout_sec=60,
         )
-        self._write_log("task-read.stderr.log", task_read.stderr)
+        self._write_optional_log("task-read.stderr.log", task_read.stderr)
         if task_read.return_code != 0:
             raise RuntimeError("failed to read /app/TASK.md during setup")
         self._task_instruction_on_disk = task_read.stdout or ""
@@ -285,22 +307,48 @@ class DshBboAgent(BaseAgent):
     ) -> dict[str, Any]:
         command = r'''python3 - <<'PY'
 import json
+import re
 from pathlib import Path
 
 root = Path('/app/methods')
 versions = root / 'versions'
-version_dirs = sorted(
-    [p.name for p in versions.iterdir() if p.is_dir() and p.name.startswith('v')]
+all_snapshot_dirs = sorted(
+    [p.name for p in versions.iterdir() if p.is_dir()]
 ) if versions.is_dir() else []
+canonical_snapshot_dirs = sorted(
+    [name for name in all_snapshot_dirs if re.fullmatch(r'v[0-9]+', name)],
+    key=lambda x: int(x[1:]),
+)
+noncanonical_snapshot_dirs = sorted(
+    [name for name in all_snapshot_dirs if name not in canonical_snapshot_dirs]
+)
 log = root / 'experiment_log.md'
 solver = root / 'main' / 'solver.py'
+log_text = log.read_text(encoding='utf-8', errors='replace') if log.is_file() else ''
+logged_versions = []
+for match in re.finditer(r'^##\s+(v[0-9]+)\b', log_text, flags=re.MULTILINE):
+    version = match.group(1)
+    if version not in logged_versions:
+        logged_versions.append(version)
+# v0 is the shipped baseline; snapshot completeness concerns agent-created versions.
+logged_candidate_versions = [v for v in logged_versions if v != 'v0']
+missing = [v for v in logged_candidate_versions if v not in canonical_snapshot_dirs]
+extra = [v for v in canonical_snapshot_dirs if v not in logged_candidate_versions]
 print(json.dumps({
     'final_solver_exists': solver.is_file(),
     'experiment_log_exists': log.is_file(),
     'experiment_log_nonempty': log.is_file() and log.stat().st_size > 0,
     'versions_dir_exists': versions.is_dir(),
-    'version_count': len(version_dirs),
-    'versions': version_dirs,
+    'logged_versions': logged_versions,
+    'logged_candidate_versions': logged_candidate_versions,
+    'logged_version_count': len(logged_candidate_versions),
+    'snapshot_dirs': all_snapshot_dirs,
+    'canonical_snapshot_versions': canonical_snapshot_dirs,
+    'snapshot_version_count': len(canonical_snapshot_dirs),
+    'noncanonical_snapshot_dirs': noncanonical_snapshot_dirs,
+    'missing_snapshot_versions': missing,
+    'extra_snapshot_versions': extra,
+    'snapshot_complete': bool(logged_candidate_versions) and not missing and not noncanonical_snapshot_dirs,
 }, sort_keys=True))
 PY'''
         audit = await environment.exec(
@@ -309,8 +357,8 @@ PY'''
             env=self._runtime_env(),
             timeout_sec=60,
         )
-        self._write_log("autoresearch-audit.stderr.log", audit.stderr)
-        self._write_log("autoresearch-audit.json", audit.stdout)
+        self._write_optional_log("autoresearch-audit.stderr.log", audit.stderr)
+        self._write_required_log("autoresearch-audit.json", audit.stdout)
         if audit.return_code != 0:
             raise RuntimeError("failed to audit autoresearch bookkeeping artifacts")
         try:
@@ -340,8 +388,8 @@ PY'''
             env=self._runtime_env(),
             timeout_sec=43200,
         )
-        self._write_log("dsh.stdout.log", result.stdout)
-        self._write_log("dsh.stderr.log", result.stderr)
+        self._write_optional_log("dsh.stdout.log", result.stdout)
+        self._write_optional_log("dsh.stderr.log", result.stderr)
 
         if result.return_code != 0:
             self._record_result(context, result)
@@ -359,8 +407,8 @@ PY'''
             env=self._runtime_env(),
             timeout_sec=120,
         )
-        self._write_log("handoff.stdout.log", handoff.stdout)
-        self._write_log("handoff.stderr.log", handoff.stderr)
+        self._write_optional_log("handoff.stdout.log", handoff.stdout)
+        self._write_optional_log("handoff.stderr.log", handoff.stderr)
         if handoff.return_code != 0:
             raise RuntimeError(
                 "Agent did not leave a valid regular /app/methods/main/solver.py; "
