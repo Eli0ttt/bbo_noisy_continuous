@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "3.0"
+SCHEMA_VERSION = "3.1"
 VERSION_RE = re.compile(r"v[0-9]+")
 FINAL_STATUSES = {"kept", "reverted", "submitted", "baseline"}
 PENDING_STATUSES = {"evaluating", "evaluated", "selfcheck_failed"}
@@ -659,8 +659,21 @@ def audit_payload() -> dict[str, Any]:
         guard_failure_reasons.append(
             "missing_parent_versions=" + ",".join(missing_parent_versions)
         )
+    finalized_by = state.get("finalized_by")
+    finalization_protocol = state.get("finalization_protocol")
+    finalization_owner_complete = (
+        bool(state.get("finalized"))
+        and finalized_by == "outer_harness"
+        and finalization_protocol == "outer-harness-last-explicitly-committed-canonical"
+    )
     if not state.get("finalized"):
         guard_failure_reasons.append("state_not_finalized")
+    elif finalized_by != "outer_harness":
+        guard_failure_reasons.append("invalid_finalization_owner=" + repr(finalized_by))
+    elif finalization_protocol != "outer-harness-last-explicitly-committed-canonical":
+        guard_failure_reasons.append(
+            "invalid_finalization_protocol=" + repr(finalization_protocol)
+        )
     if not submitted_matches_final:
         guard_failure_reasons.append(
             "submitted_final_mismatch="
@@ -673,6 +686,7 @@ def audit_payload() -> dict[str, Any]:
         and decision_complete
         and lineage_complete
         and bool(state.get("finalized"))
+        and finalization_owner_complete
         and submitted_matches_final
     )
 
@@ -684,6 +698,9 @@ def audit_payload() -> dict[str, Any]:
         "canonical_version": state.get("canonical_version"),
         "pending_version": state.get("pending_version"),
         "finalized": bool(state.get("finalized")),
+        "finalized_by": state.get("finalized_by"),
+        "finalization_protocol": state.get("finalization_protocol"),
+        "finalization_owner_complete": finalization_owner_complete,
         "final_version": state.get("final_version"),
         "logged_versions": logged_versions,
         "logged_candidate_versions": logged_candidates,
@@ -718,103 +735,11 @@ def audit_payload() -> dict[str, Any]:
     }
 
 
-def finalize(args: argparse.Namespace) -> int:
-    error: str | None = None
-    try:
-        with locked_state() as state:
-            versions = state.setdefault("versions", {})
-            if state.get("finalized"):
-                # Idempotent finalization: do not alter an already frozen run.
-                pass
-            else:
-                final_solver = main_dir() / "solver.py"
-                if not final_solver.is_file():
-                    raise RuntimeError("final /app/methods/main/solver.py is missing")
-                final_sha = sha256_file(final_solver)
-                pending = state.get("pending_version")
-                canonical = state.get("canonical_version")
-
-                if not isinstance(canonical, str) or canonical not in versions:
-                    raise RuntimeError(f"invalid canonical version at handoff: {canonical!r}")
-                canonical_row = versions[canonical]
-
-                if pending:
-                    pending_row = versions.get(pending)
-                    if not isinstance(pending_row, dict):
-                        raise RuntimeError(f"pending version {pending!r} is missing from manifest")
-
-                    # An unresolved pending candidate is an uncommitted transaction.
-                    # Never infer submission from it merely being the last evaluated file.
-                    if final_sha != canonical_row.get("solver_sha256"):
-                        if final_sha == pending_row.get("solver_sha256"):
-                            raise RuntimeError(
-                                f"pending version {pending} is uncommitted but the final solver "
-                                "matches its snapshot; explicitly keep it before finishing"
-                            )
-                        raise RuntimeError(
-                            "uncheckpointed final artifact: while "
-                            f"{pending} was pending, the final solver no longer matched "
-                            f"canonical checkpoint {canonical}"
-                        )
-                    pending_row["previous_status"] = pending_row.get("status")
-                    pending_row["status"] = "reverted"
-                    pending_row["decided_at"] = utc_now()
-                    pending_row["reverted_to"] = canonical
-                    pending_row["decision_source"] = "harness_auto_abort_uncommitted_at_handoff"
-                    pending_row["decision_note"] = (
-                        "uncommitted pending candidate transactionally reverted at handoff; "
-                        f"canonical checkpoint {canonical} remained the live solver"
-                    )
-                    state.setdefault("auto_reverted_pending_versions", []).append(pending)
-                    state["pending_version"] = None
-                else:
-                    if final_sha != canonical_row.get("solver_sha256"):
-                        raise RuntimeError(
-                            "uncheckpointed final artifact: final solver does not match "
-                            f"canonical checkpoint {canonical}; evaluate and keep the final "
-                            "candidate before finishing"
-                        )
-
-                canonical_row["previous_status"] = canonical_row.get("status")
-                canonical_row["status"] = "submitted"
-                canonical_row["decided_at"] = utc_now()
-                canonical_row["decision_source"] = "harness_submit_canonical_at_handoff"
-                canonical_row["decision_note"] = (
-                    "submitted deterministically at handoff from the last explicitly "
-                    "committed canonical checkpoint"
-                )
-                final_version = canonical
-
-                # There must never be multiple submitted labels.
-                for version, row in versions.items():
-                    if version != final_version and row.get("status") == "submitted":
-                        row["status"] = "kept"
-                        row["decision_note"] = (
-                            "previous submitted label superseded before final handoff"
-                        )
-                state["finalized"] = True
-                state["finalized_at"] = utc_now()
-                state["final_version"] = final_version
-                save_state(state)
-    except Exception as exc:
-        error = str(exc)
-
-    payload = audit_payload()
-    if error:
-        payload["finalization_error"] = error
-        reasons = list(payload.get("guard_failure_reasons") or [])
-        reasons.insert(0, "finalization_error=" + error)
-        payload["guard_failure_reasons"] = reasons
-        payload["checkpoint_guard_complete"] = False
-
-    if args.json:
-        print(json.dumps(payload, sort_keys=True))
-    else:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    return 0 if payload.get("checkpoint_guard_complete") else 2
-
 
 def audit(args: argparse.Namespace) -> int:
+    if state_path().is_file():
+        state = load_state()
+        write_experiment_log(state)
     payload = audit_payload()
     if args.json:
         print(json.dumps(payload, sort_keys=True))
@@ -829,6 +754,8 @@ def status(args: argparse.Namespace) -> int:
         "canonical_version": state.get("canonical_version"),
         "pending_version": state.get("pending_version"),
         "finalized": bool(state.get("finalized")),
+        "finalized_by": state.get("finalized_by"),
+        "finalization_protocol": state.get("finalization_protocol"),
         "final_version": state.get("final_version"),
     }
     if args.json:
@@ -882,12 +809,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_checkout.add_argument("--version", required=True)
     p_checkout.set_defaults(func=checkout)
 
-    p_finalize = sub.add_parser(
-        "finalize",
-        help="abort any uncommitted pending candidate, then submit the last committed canonical checkpoint",
-    )
-    p_finalize.add_argument("--json", action="store_true")
-    p_finalize.set_defaults(func=finalize)
 
     p_audit = sub.add_parser(
         "audit", help="verify log, manifest, decisions, immutable snapshots, and final artifact agree"

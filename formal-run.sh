@@ -50,7 +50,7 @@ export DEEPSEEK_ALLOW_AGENT_HOST="${DEEPSEEK_ALLOW_AGENT_HOST:-183.230.173.202}"
 export HARBOR_BIN="${HARBOR_BIN:-$HOME/.local/share/uv/tools/harbor/bin/harbor}"
 export HARBOR_PY="${HARBOR_PY:-$HOME/.local/share/uv/tools/harbor/bin/python}"
 export NODE_ROOT="${NODE_ROOT:-$HOME/.nvm/versions/node/v22.23.2}"
-export EXPECTED_AGENT_VERSION="0.8.0-official-autoresearch-transactional-commit"
+export EXPECTED_AGENT_VERSION="0.8.1-official-autoresearch-handoff-finalization"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "missing environment file: $ENV_FILE" >&2
@@ -217,7 +217,8 @@ BASE_URL_SHA256=$(printf '%s' "$DEEPSEEK_BASE_URL" | sha256sum | awk '{print $1}
   echo "bookkeeping_checkpoint_guard=1"
   echo "version_checkpoint_protocol=transactional-snapshot-selfcheck-auto-restore"
   echo "version_decision_protocol=resolve-before-next-version"
-  echo "final_submission_protocol=last-explicitly-committed-canonical"
+  echo "final_submission_protocol=outer-harness-last-explicitly-committed-canonical"
+  echo "finalization_owner=outer_harness"
   echo "no_cordis_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-no-cordis.yml" | awk '{print $1}')"
   echo "cordis_extra_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-cordis-extra.yml" | awk '{print $1}')"
 } > "$PROTOCOL_FILE"
@@ -284,7 +285,7 @@ required = {
     "bookkeeping_checkpoint_guard": True,
     "version_checkpoint_protocol": "transactional-snapshot-selfcheck-auto-restore",
     "version_decision_protocol": "resolve-before-next-version",
-    "final_submission_protocol": "last-explicitly-committed-canonical",
+    "final_submission_protocol": "outer-harness-last-explicitly-committed-canonical",
     "checkpoint_guard_complete": True,
     "decision_complete": True,
     "lineage_complete": True,
@@ -418,7 +419,7 @@ if [ "$CONDITION" = "no-cordis" ] && [ "$TRACE_CORDIS" -ne 0 ]; then
   exit 1
 fi
 
-read -r BOOKKEEPING_STATUS LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE CHECKPOINT_GUARD DECISION_COMPLETE LINEAGE_COMPLETE FINALIZED MISSING_SNAPSHOTS HASH_MISMATCHES < <(
+read -r BOOKKEEPING_STATUS LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE CHECKPOINT_GUARD DECISION_COMPLETE LINEAGE_COMPLETE FINALIZED FINALIZATION_OWNER_COMPLETE MISSING_SNAPSHOTS HASH_MISMATCHES < <(
   "$HARBOR_PY" - "$BOOKKEEPING_AUDIT" <<'PY'
 import json, sys
 x=json.load(open(sys.argv[1]))
@@ -431,6 +432,7 @@ print(
     int(bool(x.get('decision_complete'))),
     int(bool(x.get('lineage_complete'))),
     int(bool(x.get('finalized'))),
+    int(bool(x.get('finalization_owner_complete'))),
     x.get('missing_snapshot_count', len(x.get('missing_snapshot_versions', []))),
     len(x.get('snapshot_hash_mismatches', [])),
 )
@@ -452,20 +454,20 @@ print(
 PY
 )
 
-printf 'FORMAL_AUTORESEARCH_AUDIT status=%s logged_versions=%s snapshot_versions=%s snapshot_complete=%s checkpoint_guard_complete=%s decision_complete=%s lineage_complete=%s finalized=%s missing_snapshots=%s hash_mismatches=%s\n' \
-  "$BOOKKEEPING_STATUS" "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE" "$CHECKPOINT_GUARD" "$DECISION_COMPLETE" "$LINEAGE_COMPLETE" "$FINALIZED" "$MISSING_SNAPSHOTS" "$HASH_MISMATCHES"
+printf 'FORMAL_AUTORESEARCH_AUDIT status=%s logged_versions=%s snapshot_versions=%s snapshot_complete=%s checkpoint_guard_complete=%s decision_complete=%s lineage_complete=%s finalized=%s finalization_owner_complete=%s missing_snapshots=%s hash_mismatches=%s\n' \
+  "$BOOKKEEPING_STATUS" "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE" "$CHECKPOINT_GUARD" "$DECISION_COMPLETE" "$LINEAGE_COMPLETE" "$FINALIZED" "$FINALIZATION_OWNER_COMPLETE" "$MISSING_SNAPSHOTS" "$HASH_MISMATCHES"
 printf 'FORMAL_TRACE_AUDIT scored_selfchecks=%s failed_selfcheck_tool_calls=%s llm_retries=%s tool_api_errors=%s bash_nonzero_calls=%s cordis_calls=%s\n' \
   "$TRACE_SELFCHECKS" "$TRACE_FAILED" "$TRACE_LLM_RETRIES" "$TRACE_TOOL_ERRORS" "$TRACE_BASH_NONZERO" "$TRACE_CORDIS"
 printf 'FORMAL_RUNTIME_AUDIT status=%s elapsed_sec=%s budget_sec=%s margin_sec=%s utilization_pct=%s\n' \
   "$RUNTIME_STATUS" "$RUNTIME_ELAPSED" "$RUNTIME_BUDGET" "$RUNTIME_MARGIN" "$RUNTIME_UTIL"
 
-# v0.8.0 makes official-style version transitions transactional with explicit commit. Every
+# v0.8.1 keeps research transitions transactional and makes finalization outer-harness-owned. Every
 # intermediate version must be explicitly kept/reverted before the next
 # versioned evaluation, while final submission is derived deterministically
 # from the exact final artifact. By the time hidden verification completes all
 # bookkeeping invariants must therefore be true.
-if [ "$SNAPSHOT_COMPLETE" -ne 1 ] || [ "$CHECKPOINT_GUARD" -ne 1 ] || [ "$DECISION_COMPLETE" -ne 1 ] || [ "$LINEAGE_COMPLETE" -ne 1 ] || [ "$FINALIZED" -ne 1 ] || [ "$HASH_MISMATCHES" -ne 0 ]; then
-  echo "FORMAL_BOOKKEEPING_AUDIT_FAIL snapshot_complete=$SNAPSHOT_COMPLETE checkpoint_guard_complete=$CHECKPOINT_GUARD decision_complete=$DECISION_COMPLETE lineage_complete=$LINEAGE_COMPLETE finalized=$FINALIZED missing_snapshots=$MISSING_SNAPSHOTS hash_mismatches=$HASH_MISMATCHES" >&2
+if [ "$SNAPSHOT_COMPLETE" -ne 1 ] || [ "$CHECKPOINT_GUARD" -ne 1 ] || [ "$DECISION_COMPLETE" -ne 1 ] || [ "$LINEAGE_COMPLETE" -ne 1 ] || [ "$FINALIZED" -ne 1 ] || [ "$FINALIZATION_OWNER_COMPLETE" -ne 1 ] || [ "$HASH_MISMATCHES" -ne 0 ]; then
+  echo "FORMAL_BOOKKEEPING_AUDIT_FAIL snapshot_complete=$SNAPSHOT_COMPLETE checkpoint_guard_complete=$CHECKPOINT_GUARD decision_complete=$DECISION_COMPLETE lineage_complete=$LINEAGE_COMPLETE finalized=$FINALIZED finalization_owner_complete=$FINALIZATION_OWNER_COMPLETE missing_snapshots=$MISSING_SNAPSHOTS hash_mismatches=$HASH_MISMATCHES" >&2
   exit 1
 fi
 

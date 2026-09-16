@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import shlex
@@ -27,7 +28,7 @@ class DshBboAgent(BaseAgent):
     _NO_CORDIS_PATCH = "/opt/dsh-config/bbo-no-cordis.yml"
     _CORDIS_PATCH = "/opt/dsh-config/bbo-cordis-extra.yml"
     _CHECKPOINT_HELPER = "/opt/dsh-config/version_checkpoint.py"
-    _VERSION = "0.8.0-official-autoresearch-transactional-commit"
+    _VERSION = "0.8.1-official-autoresearch-handoff-finalization"
     _PROMPT_PLACEHOLDER = "{{ instruction }}"
     _BOOKKEEPING_ADDENDUM = r"""
 
@@ -83,9 +84,11 @@ Important rules:
 - A failed/timed-out versioned selfcheck is still snapshotted and pending; keep it only if
   you intentionally want to debug forward from that exact candidate, otherwise revert it.
 - The final submission is the last explicitly committed canonical checkpoint.
-  If the headless model turn ends with one candidate still pending, that candidate is an
-  uncommitted transaction: the handoff records it as reverted and submits the canonical
-  parent. This rule is deterministic and score-independent.
+  Finalization is owned by the outer harness after the DeepSeek research process exits;
+  there is no agent-facing finalize command. If the headless model turn ends with one
+  candidate still pending, that candidate is uncommitted: the outer handoff records it
+  as reverted and submits the canonical parent. This rule is deterministic and
+  score-independent.
 - Uncheckpointed edits, missing/mutated snapshots, broken lineage, or a final solver that
   is not the canonical checkpoint remain hard failures.
 
@@ -93,6 +96,139 @@ The helper changes only local research bookkeeping/version transitions. It does 
 the task, visible data, official selfcheck or score, hidden verifier, scorer, resource
 limits, information boundary, or your autonomous research choices.
 """
+
+
+    _HANDOFF_FINALIZER_SOURCE = r"""from __future__ import annotations
+import datetime as _dt, fcntl, hashlib, json, os, sys
+from pathlib import Path
+
+ROOT = Path("/app/methods")
+STATE = ROOT / "version_checkpoints.json"
+LOCK = ROOT / ".version-checkpoint.lock"
+PROTOCOL = "outer-harness-last-explicitly-committed-canonical"
+
+def utc_now():
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def atomic_write_json(path, payload):
+    tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    with tmp.open("wb") as f:
+        f.write(data); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+def fail(message):
+    raise RuntimeError(message)
+
+try:
+    if not STATE.is_file():
+        fail("checkpoint manifest missing at handoff")
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK.open("a+") as lockf:
+        fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+        state = json.loads(STATE.read_text(encoding="utf-8"))
+        versions = state.get("versions")
+        if not isinstance(versions, dict):
+            fail("invalid checkpoint manifest: versions map missing")
+
+        if state.get("finalized"):
+            fail(
+                "premature_finalized_state: research phase must not finalize; "
+                f"finalized_by={state.get('finalized_by')!r} "
+                f"final_version={state.get('final_version')!r}"
+            )
+
+        pre_submitted = [
+            v for v, row in versions.items()
+            if isinstance(row, dict) and row.get("status") == "submitted"
+        ]
+        if pre_submitted:
+            fail("premature_submitted_labels=" + ",".join(sorted(pre_submitted)))
+
+        canonical = state.get("canonical_version")
+        if not isinstance(canonical, str) or canonical not in versions:
+            fail(f"invalid canonical version at handoff: {canonical!r}")
+        canonical_row = versions[canonical]
+        canonical_sha = canonical_row.get("solver_sha256")
+        if not isinstance(canonical_sha, str) or not canonical_sha:
+            fail(f"canonical checkpoint {canonical} has no solver sha256")
+
+        final_solver = ROOT / "main" / "solver.py"
+        if not final_solver.is_file() or final_solver.is_symlink():
+            fail("final /app/methods/main/solver.py must be a regular file")
+        final_sha = sha256_file(final_solver)
+
+        pending = state.get("pending_version")
+        if pending is not None:
+            pending_row = versions.get(pending)
+            if not isinstance(pending_row, dict):
+                fail(f"pending version {pending!r} is missing from manifest")
+            if final_sha != canonical_sha:
+                pending_sha = pending_row.get("solver_sha256")
+                if isinstance(pending_sha, str) and final_sha == pending_sha:
+                    fail(
+                        f"pending version {pending} is uncommitted but the final solver "
+                        "matches its snapshot; an explicit keep was required"
+                    )
+                fail(
+                    "uncheckpointed final artifact while a candidate was pending: "
+                    f"main does not match canonical checkpoint {canonical}"
+                )
+            pending_status = pending_row.get("status")
+            if pending_status not in {"evaluated", "selfcheck_failed", "evaluating"}:
+                fail(f"invalid pending status for {pending}: {pending_status!r}")
+            pending_row["previous_status"] = pending_status
+            pending_row["status"] = "reverted"
+            pending_row["decided_at"] = utc_now()
+            pending_row["reverted_to"] = canonical
+            pending_row["decision_source"] = "outer_harness_auto_abort_uncommitted_at_handoff"
+            pending_row["decision_note"] = (
+                "uncommitted pending candidate reverted by the outer harness at handoff; "
+                f"canonical checkpoint {canonical} remained live"
+            )
+            auto = state.setdefault("auto_reverted_pending_versions", [])
+            if pending not in auto:
+                auto.append(pending)
+            state["pending_version"] = None
+        elif final_sha != canonical_sha:
+            fail(
+                "uncheckpointed final artifact: final solver does not match "
+                f"canonical checkpoint {canonical}; evaluate and keep the final candidate "
+                "before finishing"
+            )
+
+        canonical_row["previous_status"] = canonical_row.get("status")
+        canonical_row["status"] = "submitted"
+        canonical_row["decided_at"] = utc_now()
+        canonical_row["decision_source"] = "outer_harness_submit_canonical_at_handoff"
+        canonical_row["decision_note"] = (
+            "submitted by the outer harness from the last canonical checkpoint "
+            "after the research process exited"
+        )
+        state["finalized"] = True
+        state["finalized_at"] = utc_now()
+        state["finalized_by"] = "outer_harness"
+        state["finalization_protocol"] = PROTOCOL
+        state["final_version"] = canonical
+        atomic_write_json(STATE, state)
+
+    print(json.dumps({
+        "status": "finalized",
+        "final_version": canonical,
+        "finalized_by": "outer_harness",
+        "finalization_protocol": PROTOCOL,
+        "auto_reverted_pending_versions": state.get("auto_reverted_pending_versions", []),
+    }, sort_keys=True))
+except Exception as exc:
+    print("HANDOFF_FINALIZE_ERROR: " + str(exc), file=sys.stderr)
+    raise SystemExit(2)"""
 
     def __init__(
         self,
@@ -273,7 +409,7 @@ limits, information boundary, or your autonomous research choices.
                     f"task_sha256={task_sha}",
                     f"bookkeeping_addendum_sha256={addendum_sha}",
                     f"rendered_sha256={rendered_sha}",
-                    "rendering=official template literal replacement + transactional commit bookkeeping addendum",
+                    "rendering=official template literal replacement + handoff-owned transactional bookkeeping addendum",
                     "",
                 ]
             ),
@@ -293,7 +429,8 @@ limits, information boundary, or your autonomous research choices.
             "version_checkpoint_helper": self._CHECKPOINT_HELPER,
             "version_checkpoint_protocol": "transactional-snapshot-selfcheck-auto-restore",
             "version_decision_protocol": "resolve-before-next-version",
-            "final_submission_protocol": "last-explicitly-committed-canonical",
+            "final_submission_protocol": "outer-harness-last-explicitly-committed-canonical",
+            "finalization_owner": "outer_harness",
             "workspace": "/app",
             "dsh_permission_mode": "danger-full-access",
             "isolation_boundary": "harbor-docker-task-container",
@@ -320,6 +457,8 @@ limits, information boundary, or your autonomous research choices.
                 "lineage_complete", False
             ),
             "finalized": self._bookkeeping_audit.get("finalized", False),
+            "finalized_by": self._bookkeeping_audit.get("finalized_by"),
+            "finalization_protocol": self._bookkeeping_audit.get("finalization_protocol"),
             "final_version": self._bookkeeping_audit.get("final_version"),
         }
 
@@ -404,12 +543,32 @@ limits, information boundary, or your autonomous research choices.
         self,
         environment: BaseEnvironment,
     ) -> dict[str, Any]:
-        # The checkpoint helper is the source of truth for version fidelity.
-        # Evaluation is transactional: only `keep` commits a candidate.
-        # Finalization aborts at most one still-pending uncommitted candidate
-        # and submits the last explicitly committed canonical checkpoint.
+        # Research has fully exited before this lifecycle transition. The
+        # agent-facing helper exposes no finalize operation.
+        encoded = base64.b64encode(
+            self._HANDOFF_FINALIZER_SOURCE.encode("utf-8")
+        ).decode("ascii")
+        finalizer_code = (
+            "import base64;"
+            "exec(base64.b64decode(" + repr(encoded) + ").decode('utf-8'))"
+        )
+        finalize = await environment.exec(
+            "python3 -c " + shlex.quote(finalizer_code),
+            cwd="/app",
+            env=self._runtime_env(),
+            timeout_sec=60,
+        )
+        self._write_optional_log("handoff-finalize.stdout.log", finalize.stdout)
+        self._write_optional_log("handoff-finalize.stderr.log", finalize.stderr)
+        if finalize.return_code != 0:
+            detail = (
+                finalize.stderr or finalize.stdout or
+                "unknown handoff-finalization failure"
+            ).strip()
+            raise RuntimeError("outer-harness finalization failed: " + detail)
+
         audit = await environment.exec(
-            f"python3 {shlex.quote(self._CHECKPOINT_HELPER)} finalize --json",
+            f"python3 {shlex.quote(self._CHECKPOINT_HELPER)} audit --json",
             cwd="/app",
             env=self._runtime_env(),
             timeout_sec=60,
@@ -423,9 +582,16 @@ limits, information boundary, or your autonomous research choices.
         self._bookkeeping_audit = parsed
         if audit.return_code != 0 or not parsed.get("checkpoint_guard_complete", False):
             reasons = parsed.get("guard_failure_reasons") or []
-            detail = "; ".join(str(x) for x in reasons) if reasons else "unspecified checkpoint state-machine failure"
+            detail = "; ".join(str(x) for x in reasons) if reasons else (
+                "unspecified checkpoint state-machine failure"
+            )
             raise RuntimeError(
                 "version checkpoint state machine rejected final handoff: " + detail
+            )
+        if parsed.get("finalized_by") != "outer_harness":
+            raise RuntimeError(
+                "version checkpoint state machine rejected final handoff: "
+                f"invalid finalization owner {parsed.get('finalized_by')!r}"
             )
         return parsed
 

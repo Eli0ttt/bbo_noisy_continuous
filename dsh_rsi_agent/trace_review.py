@@ -521,6 +521,9 @@ def compute_bookkeeping(
     canonical_version: str | None = None
     pending_version: str | None = None
     finalized = False
+    finalized_by: str | None = None
+    finalization_protocol: str | None = None
+    finalization_owner_complete = False
     final_version: str | None = None
     auto_reverted_pending_versions: list[str] = []
 
@@ -543,6 +546,13 @@ def compute_bookkeeping(
         canonical_version = checkpoint_state.get("canonical_version")
         pending_version = checkpoint_state.get("pending_version")
         finalized = bool(checkpoint_state.get("finalized"))
+        finalized_by = checkpoint_state.get("finalized_by")
+        finalization_protocol = checkpoint_state.get("finalization_protocol")
+        finalization_owner_complete = (
+            finalized
+            and finalized_by == "outer_harness"
+            and finalization_protocol == "outer-harness-last-explicitly-committed-canonical"
+        )
         final_version = checkpoint_state.get("final_version")
         auto_reverted_pending_versions = list(
             checkpoint_state.get("auto_reverted_pending_versions") or []
@@ -601,6 +611,7 @@ def compute_bookkeeping(
             and decision_complete
             and lineage_complete
             and finalized
+            and finalization_owner_complete
             and submitted_matches_final
         )
     status = "PASS" if checkpoint_guard_complete else "WARN"
@@ -632,6 +643,15 @@ def compute_bookkeeping(
         )
     if checkpoint_guard_present and not finalized:
         guard_failure_reasons.append("state_not_finalized")
+    elif checkpoint_guard_present and not finalization_owner_complete:
+        if finalized_by != "outer_harness":
+            guard_failure_reasons.append(
+                "invalid_finalization_owner=" + repr(finalized_by)
+            )
+        else:
+            guard_failure_reasons.append(
+                "invalid_finalization_protocol=" + repr(finalization_protocol)
+            )
     if checkpoint_guard_present and not submitted_matches_final:
         guard_failure_reasons.append(
             "submitted_final_mismatch="
@@ -672,6 +692,9 @@ def compute_bookkeeping(
         "canonical_version": canonical_version,
         "pending_version": pending_version,
         "finalized": finalized,
+        "finalized_by": finalized_by,
+        "finalization_protocol": finalization_protocol,
+        "finalization_owner_complete": finalization_owner_complete,
         "final_version": final_version,
         "undecided_versions": undecided_versions,
         "decision_complete": decision_complete,
@@ -880,7 +903,7 @@ def main() -> None:
     )
 
     summary = {
-        "review_schema_version": "0.8.0",
+        "review_schema_version": "0.8.1",
         "job_name": args.job_name,
         "condition": args.condition,
         "run_number": int(args.run_number),
@@ -936,6 +959,9 @@ def main() -> None:
             "canonical_version": bookkeeping["canonical_version"],
             "pending_version": bookkeeping["pending_version"],
             "finalized": bookkeeping["finalized"],
+            "finalized_by": bookkeeping["finalized_by"],
+            "finalization_protocol": bookkeeping["finalization_protocol"],
+            "finalization_owner_complete": bookkeeping["finalization_owner_complete"],
             "final_version": bookkeeping["final_version"],
             "undecided_versions": bookkeeping["undecided_versions"],
             "decision_complete": bookkeeping["decision_complete"],
@@ -1031,6 +1057,9 @@ def main() -> None:
         f"- canonical version: `{bookkeeping['canonical_version']}`",
         f"- pending version: `{bookkeeping['pending_version']}`",
         f"- finalized: `{bookkeeping['finalized']}`",
+        f"- finalized by: `{bookkeeping['finalized_by']}`",
+        f"- finalization protocol: `{bookkeeping['finalization_protocol']}`",
+        f"- finalization owner complete: `{bookkeeping['finalization_owner_complete']}`",
         f"- final version: `{bookkeeping['final_version']}`",
         f"- undecided versions: `{bookkeeping['undecided_versions']}`",
         f"- decision complete: `{bookkeeping['decision_complete']}`",
