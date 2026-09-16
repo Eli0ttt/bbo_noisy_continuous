@@ -217,7 +217,11 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
     tool_api_errors = 0
     bash_nonzero_calls = 0
     bash_nonzero_exit_codes: collections.Counter[str] = collections.Counter()
+    checkpoint_baseline_calls = 0
     checkpoint_evaluate_calls = 0
+    direct_selfcheck_attempts = 0
+    blocked_direct_selfcheck_attempts = 0
+    unblocked_direct_selfcheck_executions = 0
     checkpoint_keep_calls = 0
     checkpoint_revert_calls = 0
     checkpoint_checkout_calls = 0
@@ -251,11 +255,18 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
             cordis_related_calls += 1
 
         command_text = str(args.get("command", "")) if name == "bash" else ""
+        is_checkpoint_baseline = (
+            name == "bash"
+            and "version_checkpoint.py" in command_text
+            and re.search(r"(?:^|\s)baseline(?:\s|$)", command_text) is not None
+        )
         is_checkpoint_evaluate = (
             name == "bash"
             and "version_checkpoint.py" in command_text
             and re.search(r"(?:^|\s)evaluate(?:\s|$)", command_text) is not None
         )
+        if is_checkpoint_baseline:
+            checkpoint_baseline_calls += 1
         if is_checkpoint_evaluate:
             checkpoint_evaluate_calls += 1
         if name == "bash" and "version_checkpoint.py" in command_text and re.search(r"(?:^|\s)keep(?:\s|$)", command_text):
@@ -271,16 +282,35 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
         # selfcheck starts. Count it as a selfcheck execution only when the
         # helper emitted its explicit start marker. Bare selfcheck commands are
         # still counted directly.
+        checkpoint_baseline_started = (
+            is_checkpoint_baseline
+            and "BASELINE_SELFCHECK_START version=v0" in result_text
+        )
         checkpoint_selfcheck_started = (
             is_checkpoint_evaluate
             and "VERSION_SELFCHECK_START version=" in result_text
         )
-        direct_selfcheck = (
+        direct_selfcheck_attempt = (
             name == "bash"
-            and "selfcheck" in rendered_args
+            and "selfcheck.py" in rendered_args
             and "version_checkpoint.py" not in command_text
         )
-        is_selfcheck = direct_selfcheck or checkpoint_selfcheck_started
+        direct_selfcheck_blocked = (
+            direct_selfcheck_attempt
+            and "BBO_DIRECT_SELFCHECK_DENIED" in result_text
+        )
+        direct_selfcheck = direct_selfcheck_attempt and not direct_selfcheck_blocked
+        if direct_selfcheck_attempt:
+            direct_selfcheck_attempts += 1
+        if direct_selfcheck_blocked:
+            blocked_direct_selfcheck_attempts += 1
+        if direct_selfcheck:
+            unblocked_direct_selfcheck_executions += 1
+        is_selfcheck = (
+            direct_selfcheck
+            or checkpoint_baseline_started
+            or checkpoint_selfcheck_started
+        )
         score_payloads: list[dict[str, Any]] = []
         if is_selfcheck:
             selfcheck_tool_calls += 1
@@ -344,7 +374,11 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
         "tool_api_errors": tool_api_errors,
         "bash_nonzero_calls": bash_nonzero_calls,
         "bash_nonzero_exit_codes": dict(sorted(bash_nonzero_exit_codes.items())),
+        "checkpoint_baseline_calls": checkpoint_baseline_calls,
         "checkpoint_evaluate_calls": checkpoint_evaluate_calls,
+        "direct_selfcheck_attempts": direct_selfcheck_attempts,
+        "blocked_direct_selfcheck_attempts": blocked_direct_selfcheck_attempts,
+        "unblocked_direct_selfcheck_executions": unblocked_direct_selfcheck_executions,
         "checkpoint_keep_calls": checkpoint_keep_calls,
         "checkpoint_revert_calls": checkpoint_revert_calls,
         "checkpoint_checkout_calls": checkpoint_checkout_calls,
@@ -514,6 +548,8 @@ def compute_bookkeeping(
     snapshot_hash_mismatches: list[str] = []
     undecided_versions: list[str] = []
     missing_parent_versions: list[str] = []
+    canonical_eligible = False
+    invalid_committed_versions: list[str] = []
     final_solver_sha256: str | None = None
     matching_final_versions: list[str] = []
     submitted_versions: list[str] = []
@@ -556,6 +592,10 @@ def compute_bookkeeping(
         final_version = checkpoint_state.get("final_version")
         auto_reverted_pending_versions = list(
             checkpoint_state.get("auto_reverted_pending_versions") or []
+        )
+        canonical_eligible = bool(checkpoint_state.get("canonical_eligible", False))
+        invalid_committed_versions = list(
+            checkpoint_state.get("invalid_committed_versions") or []
         )
 
         for version in manifest_versions:
@@ -610,6 +650,8 @@ def compute_bookkeeping(
             and not snapshot_hash_mismatches
             and decision_complete
             and lineage_complete
+            and canonical_eligible
+            and not invalid_committed_versions
             and finalized
             and finalization_owner_complete
             and submitted_matches_final
@@ -641,6 +683,12 @@ def compute_bookkeeping(
         guard_failure_reasons.append(
             "missing_parent_versions=" + ",".join(missing_parent_versions)
         )
+    if checkpoint_guard_present and invalid_committed_versions:
+        guard_failure_reasons.append(
+            "invalid_committed_versions=" + ",".join(invalid_committed_versions)
+        )
+    if checkpoint_guard_present and not canonical_eligible:
+        guard_failure_reasons.append("canonical_not_eligible")
     if checkpoint_guard_present and not finalized:
         guard_failure_reasons.append("state_not_finalized")
     elif checkpoint_guard_present and not finalization_owner_complete:
@@ -700,6 +748,8 @@ def compute_bookkeeping(
         "decision_complete": decision_complete,
         "missing_parent_versions": missing_parent_versions,
         "lineage_complete": lineage_complete,
+        "canonical_eligible": canonical_eligible,
+        "invalid_committed_versions": invalid_committed_versions,
         "final_solver_sha256": final_solver_sha256,
         "matching_final_versions": matching_final_versions,
         "submitted_versions": submitted_versions,
@@ -903,7 +953,7 @@ def main() -> None:
     )
 
     summary = {
-        "review_schema_version": "0.8.1",
+        "review_schema_version": "0.8.2",
         "job_name": args.job_name,
         "condition": args.condition,
         "run_number": int(args.run_number),
@@ -934,7 +984,11 @@ def main() -> None:
             "tool_api_errors": trace["tool_api_errors"],
             "bash_nonzero_calls": trace["bash_nonzero_calls"],
             "bash_nonzero_exit_codes": trace["bash_nonzero_exit_codes"],
+            "checkpoint_baseline_calls": trace["checkpoint_baseline_calls"],
             "checkpoint_evaluate_calls": trace["checkpoint_evaluate_calls"],
+            "direct_selfcheck_attempts": trace["direct_selfcheck_attempts"],
+            "blocked_direct_selfcheck_attempts": trace["blocked_direct_selfcheck_attempts"],
+            "unblocked_direct_selfcheck_executions": trace["unblocked_direct_selfcheck_executions"],
             "checkpoint_keep_calls": trace["checkpoint_keep_calls"],
             "checkpoint_revert_calls": trace["checkpoint_revert_calls"],
             "checkpoint_checkout_calls": trace["checkpoint_checkout_calls"],
@@ -967,6 +1021,8 @@ def main() -> None:
             "decision_complete": bookkeeping["decision_complete"],
             "missing_parent_versions": bookkeeping["missing_parent_versions"],
             "lineage_complete": bookkeeping["lineage_complete"],
+            "canonical_eligible": bookkeeping["canonical_eligible"],
+            "invalid_committed_versions": bookkeeping["invalid_committed_versions"],
             "matching_final_versions": bookkeeping["matching_final_versions"],
             "submitted_versions": bookkeeping["submitted_versions"],
             "submitted_matches_final": bookkeeping["submitted_matches_final"],
@@ -1034,7 +1090,11 @@ def main() -> None:
         f"- tool API errors: `{trace['tool_api_errors']}`",
         f"- bash nonzero calls: `{trace['bash_nonzero_calls']}`",
         f"- bash nonzero exit codes: `{trace['bash_nonzero_exit_codes']}`",
+        f"- checkpoint baseline calls: `{trace['checkpoint_baseline_calls']}`",
         f"- checkpoint evaluate calls: `{trace['checkpoint_evaluate_calls']}`",
+        f"- direct selfcheck attempts: `{trace['direct_selfcheck_attempts']}`",
+        f"- blocked direct selfcheck attempts: `{trace['blocked_direct_selfcheck_attempts']}`",
+        f"- unblocked direct selfcheck executions: `{trace['unblocked_direct_selfcheck_executions']}`",
         f"- checkpoint keep calls: `{trace['checkpoint_keep_calls']}`",
         f"- checkpoint revert calls: `{trace['checkpoint_revert_calls']}`",
         f"- checkpoint checkout calls: `{trace['checkpoint_checkout_calls']}`",
@@ -1065,6 +1125,8 @@ def main() -> None:
         f"- decision complete: `{bookkeeping['decision_complete']}`",
         f"- missing parent versions: `{bookkeeping['missing_parent_versions']}`",
         f"- lineage complete: `{bookkeeping['lineage_complete']}`",
+        f"- canonical eligible: `{bookkeeping['canonical_eligible']}`",
+        f"- invalid committed versions: `{bookkeeping['invalid_committed_versions']}`",
         f"- submitted versions: `{bookkeeping['submitted_versions']}`",
         f"- final solver matches submitted snapshot: `{bookkeeping['submitted_matches_final']}`",
         f"- missing snapshot count: `{bookkeeping['missing_snapshot_count']}`",

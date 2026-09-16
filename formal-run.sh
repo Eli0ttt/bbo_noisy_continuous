@@ -39,6 +39,7 @@ export AGENT_FILE="$BBO_ROOT/dsh_rsi_agent/dsh_bbo_agent.py"
 export AGENT_IMPORT="dsh_rsi_agent.dsh_bbo_agent:DshBboAgent"
 export TRACE_REVIEW_PY="$BBO_ROOT/dsh_rsi_agent/trace_review.py"
 export CONFIG_ROOT="$BBO_ROOT/dsh_rsi_config"
+export SELFCHECK_GUARD="$CONFIG_ROOT/bbo-selfcheck-guard.mjs"
 export CHECKPOINT_HELPER="$CONFIG_ROOT/version_checkpoint.py"
 export OFFICIAL_ROOT="$BBO_ROOT/official_rsi"
 export PROMPT_ROOT="$OFFICIAL_ROOT/infra/prompts"
@@ -50,7 +51,7 @@ export DEEPSEEK_ALLOW_AGENT_HOST="${DEEPSEEK_ALLOW_AGENT_HOST:-183.230.173.202}"
 export HARBOR_BIN="${HARBOR_BIN:-$HOME/.local/share/uv/tools/harbor/bin/harbor}"
 export HARBOR_PY="${HARBOR_PY:-$HOME/.local/share/uv/tools/harbor/bin/python}"
 export NODE_ROOT="${NODE_ROOT:-$HOME/.nvm/versions/node/v22.23.2}"
-export EXPECTED_AGENT_VERSION="0.8.1-official-autoresearch-handoff-finalization"
+export EXPECTED_AGENT_VERSION="0.8.2-official-autoresearch-complete-visible-ledger"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "missing environment file: $ENV_FILE" >&2
@@ -88,6 +89,7 @@ for file in \
   "$AGENT_FILE" \
   "$TRACE_REVIEW_PY" \
   "$CONFIG_ROOT/bbo-no-cordis.yml" \
+  "$SELFCHECK_GUARD" \
   "$CONFIG_ROOT/bbo-cordis-extra.yml" \
   "$CHECKPOINT_HELPER" \
   "$ARB_PROMPT_TEMPLATE" \
@@ -214,8 +216,10 @@ BASE_URL_SHA256=$(printf '%s' "$DEEPSEEK_BASE_URL" | sha256sum | awk '{print $1}
   echo "agent_sha256=$(sha256sum "$AGENT_FILE" | awk '{print $1}')"
   echo "trace_review_sha256=$(sha256sum "$TRACE_REVIEW_PY" | awk '{print $1}')"
   echo "version_checkpoint_helper_sha256=$(sha256sum "$CHECKPOINT_HELPER" | awk '{print $1}')"
+  echo "selfcheck_guard_sha256=$(sha256sum "$SELFCHECK_GUARD" | awk '{print $1}')"
+  echo "visible_selfcheck_protocol=checkpoint-helper-only"
   echo "bookkeeping_checkpoint_guard=1"
-  echo "version_checkpoint_protocol=transactional-snapshot-selfcheck-auto-restore"
+  echo "version_checkpoint_protocol=transactional-complete-visible-ledger"
   echo "version_decision_protocol=resolve-before-next-version"
   echo "final_submission_protocol=outer-harness-last-explicitly-committed-canonical"
   echo "finalization_owner=outer_harness"
@@ -283,7 +287,9 @@ required = {
     "rendered_autoresearch_prompt": True,
     "single_persistent_session": True,
     "bookkeeping_checkpoint_guard": True,
-    "version_checkpoint_protocol": "transactional-snapshot-selfcheck-auto-restore",
+    "version_checkpoint_protocol": "transactional-complete-visible-ledger",
+    "visible_selfcheck_protocol": "checkpoint-helper-only",
+    "direct_selfcheck_guard": True,
     "version_decision_protocol": "resolve-before-next-version",
     "final_submission_protocol": "outer-harness-last-explicitly-committed-canonical",
     "checkpoint_guard_complete": True,
@@ -394,13 +400,16 @@ done
 
 # Trace/runtime diagnostics are descriptive. Version checkpoint fidelity is a
 # hard pre-verifier contract in agent v0.8.0 and is rechecked here post-hoc.
-read -r TRACE_SELFCHECKS TRACE_FAILED TRACE_LLM_RETRIES TRACE_TOOL_ERRORS TRACE_BASH_NONZERO TRACE_CORDIS TRACE_SANDBOX < <(
+read -r TRACE_SELFCHECKS TRACE_FAILED TRACE_DIRECT_ATTEMPTS TRACE_DIRECT_BLOCKED TRACE_DIRECT_UNBLOCKED TRACE_LLM_RETRIES TRACE_TOOL_ERRORS TRACE_BASH_NONZERO TRACE_CORDIS TRACE_SANDBOX < <(
   "$HARBOR_PY" - "$TRACE_AUDIT" <<'PY'
 import json, sys
 x=json.load(open(sys.argv[1]))
 print(
     x.get('scored_selfcheck_executions', 0),
     x.get('failed_selfcheck_tool_calls', 0),
+    x.get('direct_selfcheck_attempts', 0),
+    x.get('blocked_direct_selfcheck_attempts', 0),
+    x.get('unblocked_direct_selfcheck_executions', 0),
     x.get('llm_retry_events', 0),
     x.get('tool_api_errors', 0),
     x.get('bash_nonzero_calls', 0),
@@ -410,6 +419,10 @@ print(
 PY
 )
 
+if [ "$TRACE_DIRECT_UNBLOCKED" -ne 0 ]; then
+  echo "FORMAL_DIRECT_SELFCHECK_ROUTE_FAIL unblocked_direct_selfchecks=$TRACE_DIRECT_UNBLOCKED" >&2
+  exit 1
+fi
 if [ "$TRACE_SANDBOX" -ne 0 ]; then
   echo "FORMAL_INFRASTRUCTURE_AUDIT_FAIL sandbox_backend_failures=$TRACE_SANDBOX" >&2
   exit 1
@@ -419,7 +432,7 @@ if [ "$CONDITION" = "no-cordis" ] && [ "$TRACE_CORDIS" -ne 0 ]; then
   exit 1
 fi
 
-read -r BOOKKEEPING_STATUS LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE CHECKPOINT_GUARD DECISION_COMPLETE LINEAGE_COMPLETE FINALIZED FINALIZATION_OWNER_COMPLETE MISSING_SNAPSHOTS HASH_MISMATCHES < <(
+read -r BOOKKEEPING_STATUS LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE CHECKPOINT_GUARD DECISION_COMPLETE LINEAGE_COMPLETE CANONICAL_ELIGIBLE INVALID_COMMITTED FINALIZED FINALIZATION_OWNER_COMPLETE MISSING_SNAPSHOTS HASH_MISMATCHES < <(
   "$HARBOR_PY" - "$BOOKKEEPING_AUDIT" <<'PY'
 import json, sys
 x=json.load(open(sys.argv[1]))
@@ -431,6 +444,8 @@ print(
     int(bool(x.get('checkpoint_guard_complete'))),
     int(bool(x.get('decision_complete'))),
     int(bool(x.get('lineage_complete'))),
+    int(bool(x.get('canonical_eligible'))),
+    len(x.get('invalid_committed_versions', [])),
     int(bool(x.get('finalized'))),
     int(bool(x.get('finalization_owner_complete'))),
     x.get('missing_snapshot_count', len(x.get('missing_snapshot_versions', []))),
@@ -454,20 +469,20 @@ print(
 PY
 )
 
-printf 'FORMAL_AUTORESEARCH_AUDIT status=%s logged_versions=%s snapshot_versions=%s snapshot_complete=%s checkpoint_guard_complete=%s decision_complete=%s lineage_complete=%s finalized=%s finalization_owner_complete=%s missing_snapshots=%s hash_mismatches=%s\n' \
-  "$BOOKKEEPING_STATUS" "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE" "$CHECKPOINT_GUARD" "$DECISION_COMPLETE" "$LINEAGE_COMPLETE" "$FINALIZED" "$FINALIZATION_OWNER_COMPLETE" "$MISSING_SNAPSHOTS" "$HASH_MISMATCHES"
-printf 'FORMAL_TRACE_AUDIT scored_selfchecks=%s failed_selfcheck_tool_calls=%s llm_retries=%s tool_api_errors=%s bash_nonzero_calls=%s cordis_calls=%s\n' \
-  "$TRACE_SELFCHECKS" "$TRACE_FAILED" "$TRACE_LLM_RETRIES" "$TRACE_TOOL_ERRORS" "$TRACE_BASH_NONZERO" "$TRACE_CORDIS"
+printf 'FORMAL_AUTORESEARCH_AUDIT status=%s logged_versions=%s snapshot_versions=%s snapshot_complete=%s checkpoint_guard_complete=%s decision_complete=%s lineage_complete=%s canonical_eligible=%s invalid_committed=%s finalized=%s finalization_owner_complete=%s missing_snapshots=%s hash_mismatches=%s\n' \
+  "$BOOKKEEPING_STATUS" "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE" "$CHECKPOINT_GUARD" "$DECISION_COMPLETE" "$LINEAGE_COMPLETE" "$CANONICAL_ELIGIBLE" "$INVALID_COMMITTED" "$FINALIZED" "$FINALIZATION_OWNER_COMPLETE" "$MISSING_SNAPSHOTS" "$HASH_MISMATCHES"
+printf 'FORMAL_TRACE_AUDIT scored_selfchecks=%s failed_selfcheck_tool_calls=%s direct_selfcheck_attempts=%s blocked_direct_selfchecks=%s unblocked_direct_selfchecks=%s llm_retries=%s tool_api_errors=%s bash_nonzero_calls=%s cordis_calls=%s\n' \
+  "$TRACE_SELFCHECKS" "$TRACE_FAILED" "$TRACE_DIRECT_ATTEMPTS" "$TRACE_DIRECT_BLOCKED" "$TRACE_DIRECT_UNBLOCKED" "$TRACE_LLM_RETRIES" "$TRACE_TOOL_ERRORS" "$TRACE_BASH_NONZERO" "$TRACE_CORDIS"
 printf 'FORMAL_RUNTIME_AUDIT status=%s elapsed_sec=%s budget_sec=%s margin_sec=%s utilization_pct=%s\n' \
   "$RUNTIME_STATUS" "$RUNTIME_ELAPSED" "$RUNTIME_BUDGET" "$RUNTIME_MARGIN" "$RUNTIME_UTIL"
 
-# v0.8.1 keeps research transitions transactional and makes finalization outer-harness-owned. Every
+# v0.8.2 keeps every scored visible evaluation on the helper ledger and makes finalization outer-harness-owned. Every
 # intermediate version must be explicitly kept/reverted before the next
 # versioned evaluation, while final submission is derived deterministically
 # from the exact final artifact. By the time hidden verification completes all
 # bookkeeping invariants must therefore be true.
-if [ "$SNAPSHOT_COMPLETE" -ne 1 ] || [ "$CHECKPOINT_GUARD" -ne 1 ] || [ "$DECISION_COMPLETE" -ne 1 ] || [ "$LINEAGE_COMPLETE" -ne 1 ] || [ "$FINALIZED" -ne 1 ] || [ "$FINALIZATION_OWNER_COMPLETE" -ne 1 ] || [ "$HASH_MISMATCHES" -ne 0 ]; then
-  echo "FORMAL_BOOKKEEPING_AUDIT_FAIL snapshot_complete=$SNAPSHOT_COMPLETE checkpoint_guard_complete=$CHECKPOINT_GUARD decision_complete=$DECISION_COMPLETE lineage_complete=$LINEAGE_COMPLETE finalized=$FINALIZED finalization_owner_complete=$FINALIZATION_OWNER_COMPLETE missing_snapshots=$MISSING_SNAPSHOTS hash_mismatches=$HASH_MISMATCHES" >&2
+if [ "$SNAPSHOT_COMPLETE" -ne 1 ] || [ "$CHECKPOINT_GUARD" -ne 1 ] || [ "$DECISION_COMPLETE" -ne 1 ] || [ "$LINEAGE_COMPLETE" -ne 1 ] || [ "$CANONICAL_ELIGIBLE" -ne 1 ] || [ "$INVALID_COMMITTED" -ne 0 ] || [ "$FINALIZED" -ne 1 ] || [ "$FINALIZATION_OWNER_COMPLETE" -ne 1 ] || [ "$HASH_MISMATCHES" -ne 0 ]; then
+  echo "FORMAL_BOOKKEEPING_AUDIT_FAIL snapshot_complete=$SNAPSHOT_COMPLETE checkpoint_guard_complete=$CHECKPOINT_GUARD decision_complete=$DECISION_COMPLETE lineage_complete=$LINEAGE_COMPLETE canonical_eligible=$CANONICAL_ELIGIBLE invalid_committed=$INVALID_COMMITTED finalized=$FINALIZED finalization_owner_complete=$FINALIZATION_OWNER_COMPLETE missing_snapshots=$MISSING_SNAPSHOTS hash_mismatches=$HASH_MISMATCHES" >&2
   exit 1
 fi
 

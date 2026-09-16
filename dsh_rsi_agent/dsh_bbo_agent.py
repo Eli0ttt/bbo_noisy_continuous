@@ -28,7 +28,8 @@ class DshBboAgent(BaseAgent):
     _NO_CORDIS_PATCH = "/opt/dsh-config/bbo-no-cordis.yml"
     _CORDIS_PATCH = "/opt/dsh-config/bbo-cordis-extra.yml"
     _CHECKPOINT_HELPER = "/opt/dsh-config/version_checkpoint.py"
-    _VERSION = "0.8.1-official-autoresearch-handoff-finalization"
+    _SELFCHECK_GUARD = "/opt/dsh-config/bbo-selfcheck-guard.mjs"
+    _VERSION = "0.8.2-official-autoresearch-complete-visible-ledger"
     _PROMPT_PLACEHOLDER = "{{ instruction }}"
     _BOOKKEEPING_ADDENDUM = r"""
 
@@ -36,22 +37,26 @@ class DshBboAgent(BaseAgent):
 
 ## Harness transactional bookkeeping for the official version/log requirement
 
-The official autoresearch instruction above requires an experiment log, saved versions,
-and explicit keep/rollback decisions. This harness provides a local transactional helper
-that enforces those semantics without choosing your hypotheses, version count, selfcheck
-frequency, or optimization method.
+The official autoresearch instruction above requires visible selfchecks, an experiment log,
+saved versions, and keep/rollback decisions. This harness routes every **scored visible
+evaluation used for research** through a transactional helper so the source, score, and
+decision remain one-to-one and auditable.
 
-For every candidate that you decide to name as a version `vN`, evaluate it with:
+Evaluate the shipped v0 baseline, if you want its visible score, with:
+
+```bash
+python /opt/dsh-config/version_checkpoint.py baseline
+```
+
+For every candidate solver, use a new monotonically increasing version id:
 
 ```bash
 python /opt/dsh-config/version_checkpoint.py evaluate --version vN --description "brief hypothesis/change"
 ```
 
-The helper first snapshots the exact candidate from `/app/methods/main/solver.py` to
-`/app/methods/versions/vN/solver.py`, then runs the unmodified official
-`/app/selfcheck.py --json`. After the selfcheck it automatically restores the current
-canonical parent into `/app/methods/main/solver.py`. The candidate is therefore an
-uncommitted transaction until you explicitly choose:
+The helper first snapshots the exact candidate from `/app/methods/main/solver.py`, then runs
+the **unmodified official** `/app/selfcheck.py --json`. After the selfcheck it restores the
+current canonical parent. The candidate is uncommitted until you explicitly choose:
 
 ```bash
 python /opt/dsh-config/version_checkpoint.py keep --version vN --note "why this is kept"
@@ -63,39 +68,40 @@ or:
 python /opt/dsh-config/version_checkpoint.py revert --version vN --note "why this is reverted"
 ```
 
-`keep` commits the candidate by restoring its snapshot to `methods/main` and making it
-canonical. `revert` leaves/restores the parent canonical. A later versioned evaluation
-is refused until the pending candidate is resolved.
+`keep` is allowed only after a successful official selfcheck. A failed/timed-out candidate
+must be reverted, fixed, and evaluated again as a new version before it can become canonical.
 
-To branch from an older saved checkpoint after resolving the current candidate:
+To deliberately branch from an older checkpoint after resolving the current candidate:
 
 ```bash
 python /opt/dsh-config/version_checkpoint.py checkout --version vM
 ```
 
+Only v0 or a successfully-selfchecked checkpoint may become canonical.
+
 Important rules:
 
+- Do **not** execute `/app/selfcheck.py` directly from Bash. The harness blocks direct
+  model-facing selfcheck execution. You may read/inspect its source; scoring must use
+  `baseline` or `evaluate` above.
 - Do not edit `methods/main/solver.py` for the next experiment while a candidate is pending.
-- Version numbering, hypotheses, experiment selection, keep/revert choices, and research
-  strategy remain yours.
-- Direct `selfcheck.py` calls are allowed for unversioned diagnostics, but a diagnostic
-  must not later be called `vN` unless re-evaluated through `evaluate`.
-- Do not manually overwrite version snapshots, the checkpoint manifest, or the version table.
-- A failed/timed-out versioned selfcheck is still snapshotted and pending; keep it only if
-  you intentionally want to debug forward from that exact candidate, otherwise revert it.
-- The final submission is the last explicitly committed canonical checkpoint.
-  Finalization is owned by the outer harness after the DeepSeek research process exits;
-  there is no agent-facing finalize command. If the headless model turn ends with one
-  candidate still pending, that candidate is uncommitted: the outer handoff records it
-  as reverted and submits the canonical parent. This rule is deterministic and
-  score-independent.
-- Uncheckpointed edits, missing/mutated snapshots, broken lineage, or a final solver that
-  is not the canonical checkpoint remain hard failures.
+- Every visible score that influences research/version selection must therefore have a
+  matching immutable helper checkpoint (v0 is the baseline exception).
+- Version numbering, hypotheses, experiment selection, selfcheck frequency, keep/revert
+  decisions, and optimization strategy remain yours.
+- Do not manually overwrite version snapshots, the checkpoint manifest, or its log table.
+- Finalization is owned by the outer harness only after the DeepSeek research process exits.
+  If one candidate is still pending, it is an uncommitted transaction and is reverted at
+  handoff; the last eligible canonical checkpoint is submitted without comparing scores.
+- Missing/mutated snapshots, an unsuccessfully-evaluated committed version, broken lineage,
+  uncheckpointed final edits, wrong finalization ownership, or final/submitted mismatch are
+  hard handoff failures.
 
-The helper changes only local research bookkeeping/version transitions. It does not alter
-the task, visible data, official selfcheck or score, hidden verifier, scorer, resource
+This policy changes only local research bookkeeping/tool routing. It does not alter the task,
+visible data, official selfcheck implementation or metric, hidden verifier, scorer, resource
 limits, information boundary, or your autonomous research choices.
 """
+
 
 
     _HANDOFF_FINALIZER_SOURCE = r"""from __future__ import annotations
@@ -126,6 +132,15 @@ def atomic_write_json(path, payload):
 
 def fail(message):
     raise RuntimeError(message)
+
+def successful_candidate_selfcheck(row):
+    selfcheck = row.get("selfcheck")
+    return (
+        isinstance(selfcheck, dict)
+        and selfcheck.get("return_code") == 0
+        and not bool(selfcheck.get("timed_out"))
+        and row.get("score") is not None
+    )
 
 try:
     if not STATE.is_file():
@@ -159,6 +174,16 @@ try:
         canonical_sha = canonical_row.get("solver_sha256")
         if not isinstance(canonical_sha, str) or not canonical_sha:
             fail(f"canonical checkpoint {canonical} has no solver sha256")
+        if canonical != "v0":
+            if canonical_row.get("status") != "kept":
+                fail(
+                    f"canonical checkpoint {canonical} is not explicitly committed: "
+                    f"status={canonical_row.get('status')!r}"
+                )
+            if not successful_candidate_selfcheck(canonical_row):
+                fail(
+                    f"canonical checkpoint {canonical} has no successful official visible selfcheck"
+                )
 
         final_solver = ROOT / "main" / "solver.py"
         if not final_solver.is_file() or final_solver.is_symlink():
@@ -409,7 +434,7 @@ except Exception as exc:
                     f"task_sha256={task_sha}",
                     f"bookkeeping_addendum_sha256={addendum_sha}",
                     f"rendered_sha256={rendered_sha}",
-                    "rendering=official template literal replacement + handoff-owned transactional bookkeeping addendum",
+                    "rendering=official template literal replacement + complete-visible-ledger bookkeeping addendum",
                     "",
                 ]
             ),
@@ -427,7 +452,9 @@ except Exception as exc:
             "single_persistent_session": True,
             "bookkeeping_checkpoint_guard": True,
             "version_checkpoint_helper": self._CHECKPOINT_HELPER,
-            "version_checkpoint_protocol": "transactional-snapshot-selfcheck-auto-restore",
+            "version_checkpoint_protocol": "transactional-complete-visible-ledger",
+            "visible_selfcheck_protocol": "checkpoint-helper-only",
+            "direct_selfcheck_guard": True,
             "version_decision_protocol": "resolve-before-next-version",
             "final_submission_protocol": "outer-harness-last-explicitly-committed-canonical",
             "finalization_owner": "outer_harness",
@@ -456,6 +483,12 @@ except Exception as exc:
             "lineage_complete": self._bookkeeping_audit.get(
                 "lineage_complete", False
             ),
+            "canonical_eligible": self._bookkeeping_audit.get(
+                "canonical_eligible", False
+            ),
+            "invalid_committed_versions": self._bookkeeping_audit.get(
+                "invalid_committed_versions", []
+            ),
             "finalized": self._bookkeeping_audit.get("finalized", False),
             "finalized_by": self._bookkeeping_audit.get("finalized_by"),
             "finalization_protocol": self._bookkeeping_audit.get("finalization_protocol"),
@@ -473,6 +506,7 @@ except Exception as exc:
             f"test -f {shlex.quote(self._CLI)}",
             f"test -f {shlex.quote(self._NO_CORDIS_PATCH)}",
             f"test -f {shlex.quote(self._CHECKPOINT_HELPER)}",
+            f"test -f {shlex.quote(self._SELFCHECK_GUARD)}",
             "test -f /app/AUTORESEARCH.md",
             "test -f /app/TASK.md",
             "test -f /app/budget.py",
@@ -504,6 +538,8 @@ except Exception as exc:
         ):
             if required not in config_text:
                 raise RuntimeError(f"effective DSH config is missing required tool {required}")
+        if "bbo-selfcheck-guard" not in config_text:
+            raise RuntimeError("effective DSH config is missing bbo-selfcheck-guard")
         cordis_present = "@deepseek-ai/dsh-tool-cordis" in config_text
         if cordis_present != (self.condition == "dynamic-cordis"):
             raise RuntimeError(

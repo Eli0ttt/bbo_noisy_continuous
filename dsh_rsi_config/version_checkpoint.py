@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "3.1"
+SCHEMA_VERSION = "3.2"
 VERSION_RE = re.compile(r"v[0-9]+")
 FINAL_STATUSES = {"kept", "reverted", "submitted", "baseline"}
 PENDING_STATUSES = {"evaluating", "evaluated", "selfcheck_failed"}
@@ -263,6 +263,42 @@ def ensure_not_finalized(state: dict[str, Any]) -> None:
         )
 
 
+def successful_candidate_selfcheck(row: dict[str, Any]) -> bool:
+    selfcheck = row.get("selfcheck")
+    return (
+        isinstance(selfcheck, dict)
+        and selfcheck.get("return_code") == 0
+        and not bool(selfcheck.get("timed_out"))
+        and row.get("status") not in {"evaluating", "selfcheck_failed"}
+        and row.get("score") is not None
+    )
+
+
+def canonical_target_eligible(version: str, row: dict[str, Any]) -> bool:
+    if version == "v0":
+        return row.get("status") in {"baseline", "submitted"}
+    return successful_candidate_selfcheck(row)
+
+
+def mark_reactivated(row: dict[str, Any], *, version: str, source: str, note: str) -> None:
+    previous = row.get("status")
+    if previous != "kept":
+        row["previous_status"] = previous
+        row["status"] = "kept"
+    row.setdefault("decision_history", []).append(
+        {
+            "at": utc_now(),
+            "source": source,
+            "from_status": previous,
+            "to_status": "kept",
+            "note": note,
+        }
+    )
+    row["decided_at"] = utc_now()
+    row["decision_source"] = source
+    row["decision_note"] = note
+
+
 def init_baseline(_: argparse.Namespace) -> int:
     with locked_state() as state:
         versions = state.setdefault("versions", {})
@@ -294,6 +330,90 @@ def init_baseline(_: argparse.Namespace) -> int:
         save_state(state)
     print("VERSION_CHECKPOINT_INIT version=v0 canonical=v0")
     return 0
+
+
+def baseline(args: argparse.Namespace) -> int:
+    with locked_state() as state:
+        ensure_not_finalized(state)
+        if state.get("pending_version"):
+            raise RuntimeError(
+                f"cannot evaluate baseline while {state.get('pending_version')} is pending"
+            )
+        row = state.get("versions", {}).get("v0")
+        if not isinstance(row, dict):
+            raise RuntimeError("v0 baseline is not initialized")
+        if row.get("baseline_selfcheck_completed"):
+            raise RuntimeError(
+                "baseline selfcheck has already completed successfully; reuse the recorded v0 score"
+            )
+        solver = versions_dir() / "v0" / "solver.py"
+        if not solver.is_file():
+            raise RuntimeError(f"baseline snapshot missing: {solver}")
+
+    command = [
+        sys.executable,
+        str(app_root() / "selfcheck.py"),
+        "--solver",
+        str(versions_dir() / "v0" / "solver.py"),
+        "--json",
+    ]
+    print("BASELINE_SELFCHECK_START version=v0", flush=True)
+    timed_out = False
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(app_root()),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=args.timeout,
+            check=False,
+        )
+        rc = int(proc.returncode)
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        rc = 124
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        stderr += f"\n[version-checkpoint] baseline selfcheck timed out after {args.timeout} seconds\n"
+
+    if stdout:
+        print(stdout, end="" if stdout.endswith("\n") else "\n")
+    if stderr:
+        print(stderr, file=sys.stderr, end="" if stderr.endswith("\n") else "\n")
+
+    payload = extract_metric_payload(stdout)
+    with locked_state() as state:
+        row = state["versions"]["v0"]
+        attempt = {
+            "at": utc_now(),
+            "command": command,
+            "return_code": rc,
+            "timed_out": timed_out,
+        }
+        if rc == 0 and payload is not None:
+            row["score"] = payload.get("score")
+            row["score_anytime"] = payload.get("score_anytime")
+            row["score_final"] = payload.get("score_final")
+            row["baseline_selfcheck_completed"] = True
+            attempt["metric"] = payload.get("metric")
+            attempt["score"] = payload.get("score")
+        else:
+            attempt["error"] = (
+                "timeout" if timed_out else "nonzero_exit" if rc != 0 else "missing_score_payload"
+            )
+        row.setdefault("baseline_selfcheck_attempts", []).append(attempt)
+        save_state(state)
+
+    print(
+        f"BASELINE_CHECKPOINT version=v0 score={row.get('score')} "
+        f"status={'evaluated' if row.get('baseline_selfcheck_completed') else 'selfcheck_failed'}"
+    )
+    if rc == 0 and payload is None:
+        return 65
+    return rc
 
 
 def evaluate(args: argparse.Namespace) -> int:
@@ -440,9 +560,10 @@ def keep(args: argparse.Namespace) -> int:
         row = state.get("versions", {}).get(args.version)
         if not isinstance(row, dict):
             raise RuntimeError(f"unknown version {args.version}")
-        if row.get("status") not in {"evaluated", "selfcheck_failed"}:
+        if row.get("status") != "evaluated" or not successful_candidate_selfcheck(row):
             raise RuntimeError(
-                f"cannot keep {args.version} from status {row.get('status')!r}"
+                f"cannot keep {args.version}: a candidate must have a successful official "
+                f"visible selfcheck; current status={row.get('status')!r}"
             )
         restored_sha = restore_snapshot(args.version)
         expected_sha = row.get("solver_sha256")
@@ -479,7 +600,20 @@ def revert(args: argparse.Namespace) -> int:
         target = args.to or row.get("parent")
         if not isinstance(target, str) or target not in state.get("versions", {}):
             raise RuntimeError(f"invalid revert target for {args.version}: {target!r}")
+        target_row = state["versions"][target]
+        if not canonical_target_eligible(target, target_row):
+            raise RuntimeError(
+                f"revert target {target} is not canonical-eligible; only v0 or a "
+                "successfully selfchecked checkpoint may become canonical"
+            )
         restored_sha = restore_snapshot(target)
+        if target != row.get("parent") and target != "v0":
+            mark_reactivated(
+                target_row,
+                version=target,
+                source="agent_revert_to_reactivate",
+                note=f"reactivated explicitly as revert target for {args.version}",
+            )
         row["status"] = "reverted"
         row["decided_at"] = utc_now()
         row["reverted_to"] = target
@@ -506,7 +640,20 @@ def checkout(args: argparse.Namespace) -> int:
             )
         if args.version not in state.get("versions", {}):
             raise RuntimeError(f"unknown version {args.version}")
+        target_row = state["versions"][args.version]
+        if not canonical_target_eligible(args.version, target_row):
+            raise RuntimeError(
+                f"cannot checkout {args.version}: only v0 or a successfully "
+                "selfchecked checkpoint may become canonical"
+            )
         restored_sha = restore_snapshot(args.version)
+        if args.version != "v0":
+            mark_reactivated(
+                target_row,
+                version=args.version,
+                source="agent_checkout_reactivate",
+                note="reactivated explicitly by checkout",
+            )
         state["canonical_version"] = args.version
         state["last_checkout"] = {
             "version": args.version,
@@ -584,6 +731,19 @@ def audit_payload() -> dict[str, Any]:
             or state["versions"][v]["parent"] not in state.get("versions", {})
         )
     ]
+    invalid_committed_versions = [
+        v
+        for v in state_candidates
+        if state["versions"][v].get("status") in {"kept", "submitted"}
+        and not successful_candidate_selfcheck(state["versions"][v])
+    ]
+    canonical_version = state.get("canonical_version")
+    canonical_row = state.get("versions", {}).get(canonical_version)
+    canonical_eligible = (
+        isinstance(canonical_version, str)
+        and isinstance(canonical_row, dict)
+        and canonical_target_eligible(canonical_version, canonical_row)
+    )
 
     final_solver = main_dir() / "solver.py"
     final_solver_sha256 = sha256_file(final_solver) if final_solver.is_file() else None
@@ -659,6 +819,14 @@ def audit_payload() -> dict[str, Any]:
         guard_failure_reasons.append(
             "missing_parent_versions=" + ",".join(missing_parent_versions)
         )
+    if invalid_committed_versions:
+        guard_failure_reasons.append(
+            "invalid_committed_versions=" + ",".join(invalid_committed_versions)
+        )
+    if not canonical_eligible:
+        guard_failure_reasons.append(
+            "canonical_not_eligible=" + repr(canonical_version)
+        )
     finalized_by = state.get("finalized_by")
     finalization_protocol = state.get("finalization_protocol")
     finalization_owner_complete = (
@@ -685,6 +853,8 @@ def audit_payload() -> dict[str, Any]:
         snapshot_complete
         and decision_complete
         and lineage_complete
+        and not invalid_committed_versions
+        and canonical_eligible
         and bool(state.get("finalized"))
         and finalization_owner_complete
         and submitted_matches_final
@@ -722,6 +892,8 @@ def audit_payload() -> dict[str, Any]:
         "snapshot_hash_mismatches": hash_mismatches,
         "missing_parent_versions": missing_parent_versions,
         "lineage_complete": lineage_complete,
+        "invalid_committed_versions": invalid_committed_versions,
+        "canonical_eligible": canonical_eligible,
         "undecided_versions": undecided_versions,
         "decision_complete": decision_complete,
         "final_solver_sha256": final_solver_sha256,
@@ -776,6 +948,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_init.set_defaults(func=init_baseline)
 
+    p_baseline = sub.add_parser(
+        "baseline",
+        help="run the unmodified official visible selfcheck on the immutable v0 snapshot",
+    )
+    p_baseline.add_argument("--timeout", type=float, default=None)
+    p_baseline.set_defaults(func=baseline)
+
     p_eval = sub.add_parser(
         "evaluate",
         help="snapshot one candidate, then run the unmodified official visible selfcheck",
@@ -787,7 +966,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_keep = sub.add_parser(
         "keep",
-        help="accept the sole pending version as the canonical parent for future experiments",
+        help="commit the sole pending successfully-selfchecked version as canonical",
     )
     p_keep.add_argument("--version", required=True)
     p_keep.add_argument("--note")

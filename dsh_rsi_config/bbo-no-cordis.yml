@@ -106,3 +106,10 @@
 
 - id: tool-web
   disabled: true
+
+# BBO protocol guard: direct model-facing execution of /app/selfcheck.py is
+# denied. Official visible scoring remains unchanged and is invoked by the
+# checkpoint helper.
+- insert:
+    - id: bbo-selfcheck-guard
+      name: '/opt/dsh-config/bbo-selfcheck-guard.mjs'
