@@ -29,81 +29,8 @@ class DshBboAgent(BaseAgent):
     _CORDIS_PATCH = "/opt/dsh-config/bbo-cordis-extra.yml"
     _CHECKPOINT_HELPER = "/opt/dsh-config/version_checkpoint.py"
     _SELFCHECK_GUARD = "/opt/dsh-config/bbo-selfcheck-guard.mjs"
-    _VERSION = "0.8.2-official-autoresearch-complete-visible-ledger"
+    _VERSION = "1.1.0-task-equivalent-version-ledger-guarded"
     _PROMPT_PLACEHOLDER = "{{ instruction }}"
-    _BOOKKEEPING_ADDENDUM = r"""
-
----
-
-## Harness transactional bookkeeping for the official version/log requirement
-
-The official autoresearch instruction above requires visible selfchecks, an experiment log,
-saved versions, and keep/rollback decisions. This harness routes every **scored visible
-evaluation used for research** through a transactional helper so the source, score, and
-decision remain one-to-one and auditable.
-
-Evaluate the shipped v0 baseline, if you want its visible score, with:
-
-```bash
-python /opt/dsh-config/version_checkpoint.py baseline
-```
-
-For every candidate solver, use a new monotonically increasing version id:
-
-```bash
-python /opt/dsh-config/version_checkpoint.py evaluate --version vN --description "brief hypothesis/change"
-```
-
-The helper first snapshots the exact candidate from `/app/methods/main/solver.py`, then runs
-the **unmodified official** `/app/selfcheck.py --json`. After the selfcheck it restores the
-current canonical parent. The candidate is uncommitted until you explicitly choose:
-
-```bash
-python /opt/dsh-config/version_checkpoint.py keep --version vN --note "why this is kept"
-```
-
-or:
-
-```bash
-python /opt/dsh-config/version_checkpoint.py revert --version vN --note "why this is reverted"
-```
-
-`keep` is allowed only after a successful official selfcheck. A failed/timed-out candidate
-must be reverted, fixed, and evaluated again as a new version before it can become canonical.
-
-To deliberately branch from an older checkpoint after resolving the current candidate:
-
-```bash
-python /opt/dsh-config/version_checkpoint.py checkout --version vM
-```
-
-Only v0 or a successfully-selfchecked checkpoint may become canonical.
-
-Important rules:
-
-- Do **not** execute `/app/selfcheck.py` directly from Bash. The harness blocks direct
-  model-facing selfcheck execution. You may read/inspect its source; scoring must use
-  `baseline` or `evaluate` above.
-- Do not edit `methods/main/solver.py` for the next experiment while a candidate is pending.
-- Every visible score that influences research/version selection must therefore have a
-  matching immutable helper checkpoint (v0 is the baseline exception).
-- Version numbering, hypotheses, experiment selection, selfcheck frequency, keep/revert
-  decisions, and optimization strategy remain yours.
-- Do not manually overwrite version snapshots, the checkpoint manifest, or its log table.
-- Finalization is owned by the outer harness only after the DeepSeek research process exits.
-  If one candidate is still pending, it is an uncommitted transaction and is reverted at
-  handoff; the last eligible canonical checkpoint is submitted without comparing scores.
-- Missing/mutated snapshots, an unsuccessfully-evaluated committed version, broken lineage,
-  uncheckpointed final edits, wrong finalization ownership, or final/submitted mismatch are
-  hard handoff failures.
-
-This policy changes only local research bookkeeping/tool routing. It does not alter the task,
-visible data, official selfcheck implementation or metric, hidden verifier, scorer, resource
-limits, information boundary, or your autonomous research choices.
-"""
-
-
-
     _HANDOFF_FINALIZER_SOURCE = r"""from __future__ import annotations
 import datetime as _dt, fcntl, hashlib, json, os, sys
 from pathlib import Path
@@ -111,7 +38,7 @@ from pathlib import Path
 ROOT = Path("/app/methods")
 STATE = ROOT / "version_checkpoints.json"
 LOCK = ROOT / ".version-checkpoint.lock"
-PROTOCOL = "outer-harness-last-explicitly-committed-canonical"
+PROTOCOL = "outer-harness-verifies-agent-committed-main"
 
 def utc_now():
     return _dt.datetime.now(_dt.timezone.utc).isoformat()
@@ -192,37 +119,11 @@ try:
 
         pending = state.get("pending_version")
         if pending is not None:
-            pending_row = versions.get(pending)
-            if not isinstance(pending_row, dict):
-                fail(f"pending version {pending!r} is missing from manifest")
-            if final_sha != canonical_sha:
-                pending_sha = pending_row.get("solver_sha256")
-                if isinstance(pending_sha, str) and final_sha == pending_sha:
-                    fail(
-                        f"pending version {pending} is uncommitted but the final solver "
-                        "matches its snapshot; an explicit keep was required"
-                    )
-                fail(
-                    "uncheckpointed final artifact while a candidate was pending: "
-                    f"main does not match canonical checkpoint {canonical}"
-                )
-            pending_status = pending_row.get("status")
-            if pending_status not in {"evaluated", "selfcheck_failed", "evaluating"}:
-                fail(f"invalid pending status for {pending}: {pending_status!r}")
-            pending_row["previous_status"] = pending_status
-            pending_row["status"] = "reverted"
-            pending_row["decided_at"] = utc_now()
-            pending_row["reverted_to"] = canonical
-            pending_row["decision_source"] = "outer_harness_auto_abort_uncommitted_at_handoff"
-            pending_row["decision_note"] = (
-                "uncommitted pending candidate reverted by the outer harness at handoff; "
-                f"canonical checkpoint {canonical} remained live"
+            fail(
+                f"unresolved pending version at handoff: {pending}; the agent must explicitly "
+                "keep or revert it before ending research"
             )
-            auto = state.setdefault("auto_reverted_pending_versions", [])
-            if pending not in auto:
-                auto.append(pending)
-            state["pending_version"] = None
-        elif final_sha != canonical_sha:
+        if final_sha != canonical_sha:
             fail(
                 "uncheckpointed final artifact: final solver does not match "
                 f"canonical checkpoint {canonical}; evaluate and keep the final candidate "
@@ -232,10 +133,10 @@ try:
         canonical_row["previous_status"] = canonical_row.get("status")
         canonical_row["status"] = "submitted"
         canonical_row["decided_at"] = utc_now()
-        canonical_row["decision_source"] = "outer_harness_submit_canonical_at_handoff"
+        canonical_row["decision_source"] = "outer_harness_verified_agent_canonical_main"
         canonical_row["decision_note"] = (
-            "submitted by the outer harness from the last canonical checkpoint "
-            "after the research process exited"
+            "outer harness verified that /app/methods/main/solver.py exactly matches "
+            "the agent's explicitly committed canonical checkpoint before submission"
         )
         state["finalized"] = True
         state["finalized_at"] = utc_now()
@@ -249,7 +150,6 @@ try:
         "final_version": canonical,
         "finalized_by": "outer_harness",
         "finalization_protocol": PROTOCOL,
-        "auto_reverted_pending_versions": state.get("auto_reverted_pending_versions", []),
     }, sort_keys=True))
 except Exception as exc:
     print("HANDOFF_FINALIZE_ERROR: " + str(exc), file=sys.stderr)
@@ -415,15 +315,21 @@ except Exception as exc:
             )
 
         template = self._load_official_template()
+        # This is deliberately the complete model-facing *task* prompt: no
+        # bookkeeping text and no condition-specific Cordis instruction is
+        # appended.  The shared checkpoint helper is enforced at the DSH tool
+        # boundary, while dsh-tool-cordis supplies its own official system
+        # prompt and schemas only in the dynamic-cordis condition.
         official_rendered = template.replace(
-            self._PROMPT_PLACEHOLDER,
-            instruction.rstrip("\n"),
+            self._PROMPT_PLACEHOLDER, self._task_instruction_on_disk
         )
-        rendered = official_rendered + self._BOOKKEEPING_ADDENDUM
+        rendered = official_rendered
+        if rendered != official_rendered:
+            raise RuntimeError("rendered task prompt diverged from official template output")
         template_sha = hashlib.sha256(template.encode("utf-8")).hexdigest()
-        task_sha = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
-        addendum_sha = hashlib.sha256(self._BOOKKEEPING_ADDENDUM.encode("utf-8")).hexdigest()
+        task_sha = hashlib.sha256(self._task_instruction_on_disk.encode("utf-8")).hexdigest()
         rendered_sha = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+        self._write_required_log("rendered-autoresearch-prompt.md", rendered)
         self._write_required_log("rendered-prompt.sha256", rendered_sha + "\n")
         self._write_required_log(
             "prompt-source.txt",
@@ -432,9 +338,11 @@ except Exception as exc:
                     f"template_path={self._prompt_template_path}",
                     f"template_sha256={template_sha}",
                     f"task_sha256={task_sha}",
-                    f"bookkeeping_addendum_sha256={addendum_sha}",
+                    "bookkeeping_addendum_bytes=0",
+                    "condition_addendum_bytes=0",
+                    "prompt_exact_match=true",
                     f"rendered_sha256={rendered_sha}",
-                    "rendering=official template literal replacement + complete-visible-ledger bookkeeping addendum",
+                    "rendering=official template literal replacement only",
                     "",
                 ]
             ),
@@ -449,14 +357,18 @@ except Exception as exc:
             "dsh_patches": self._patches(),
             "official_prompt_protocol": True,
             "rendered_autoresearch_prompt": True,
+            "task_prompt_addendum_bytes": 0,
+            "cordis_treatment": "available-not-required",
             "single_persistent_session": True,
             "bookkeeping_checkpoint_guard": True,
             "version_checkpoint_helper": self._CHECKPOINT_HELPER,
             "version_checkpoint_protocol": "transactional-complete-visible-ledger",
             "visible_selfcheck_protocol": "checkpoint-helper-only",
             "direct_selfcheck_guard": True,
+            "version_directory_guard": True,
+            "version_directory_protocol": "checkpoint-helper-only",
             "version_decision_protocol": "resolve-before-next-version",
-            "final_submission_protocol": "outer-harness-last-explicitly-committed-canonical",
+            "final_submission_protocol": "outer-harness-verifies-agent-committed-main",
             "finalization_owner": "outer_harness",
             "workspace": "/app",
             "dsh_permission_mode": "danger-full-access",
@@ -540,11 +452,17 @@ except Exception as exc:
                 raise RuntimeError(f"effective DSH config is missing required tool {required}")
         if "bbo-selfcheck-guard" not in config_text:
             raise RuntimeError("effective DSH config is missing bbo-selfcheck-guard")
-        cordis_present = "@deepseek-ai/dsh-tool-cordis" in config_text
-        if cordis_present != (self.condition == "dynamic-cordis"):
+        cordis_tool_present = "@deepseek-ai/dsh-tool-cordis" in config_text
+        cordis_runner_present = "@deepseek-ai/dsh-cordis-host-runner" in config_text
+        dynamic_expected = self.condition == "dynamic-cordis"
+        if (cordis_tool_present != dynamic_expected) or (
+            cordis_runner_present != dynamic_expected
+        ):
             raise RuntimeError(
-                "effective DSH config does not match the requested Cordis treatment: "
-                f"condition={self.condition!r}, cordis_present={cordis_present}"
+                "effective DSH config does not contain exactly the required Cordis "
+                "tool/host-runner pair for the requested treatment: "
+                f"condition={self.condition!r}, tool_present={cordis_tool_present}, "
+                f"runner_present={cordis_runner_present}"
             )
 
         # Cache the exact task text from inside the task container.  run() will
@@ -639,9 +557,8 @@ except Exception as exc:
     ) -> None:
         # The historical custom adapter incorrectly forwarded only the task
         # instruction. Render the official autoresearch.j2 explicitly so DSH
-        # receives the official research loop + task section, followed only by
-        # a harness bookkeeping workflow that operationalizes the prompt's own
-        # version/log/keep-or-revert requirement.
+        # receives the official research loop and task section byte-for-byte,
+        # with no adapter-authored task-prompt addendum.
         rendered_prompt = self._render_official_prompt(instruction)
 
         # One persistent DSH conversation is one outer research rollout.  Do

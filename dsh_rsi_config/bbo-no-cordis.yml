@@ -107,9 +107,10 @@
 - id: tool-web
   disabled: true
 
-# BBO protocol guard: direct model-facing execution of /app/selfcheck.py is
-# denied. Official visible scoring remains unchanged and is invoked by the
-# checkpoint helper.
+# BBO protocol guard: direct model-facing execution of /app/selfcheck.py and
+# direct mutation of /app/methods/versions are denied. Official visible
+# scoring and the immutable version ledger remain helper-owned through
+# version_checkpoint.py.
 - insert:
     - id: bbo-selfcheck-guard
       name: '/opt/dsh-config/bbo-selfcheck-guard.mjs'

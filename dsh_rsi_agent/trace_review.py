@@ -20,6 +20,68 @@ SCORE_RE = re.compile(
 PARENT_RE = re.compile(r"^-\s*Parent:\s*(\S+)", re.MULTILINE)
 STATUS_RE = re.compile(r"^-\s*Status:\s*(.+)$", re.MULTILINE)
 
+# This intentionally mirrors the DSH Bash guard.  The guard rejects ordinary
+# direct mutation attempts before they run; this independent post-run parser
+# is the second line of defence.  If it sees an attempted ledger mutation
+# whose tool result does not contain the guard's explicit denial, formal-run
+# fails rather than treating a superficially complete snapshot tree as valid.
+VERSION_REFERENCE_RE = re.compile(
+    r"(?:/app/)?methods/versions(?:/|\b)|"
+    r"(?:^|[\s\"'=;|&])(?:\./)?versions(?:/|\b)|\bBBO_METHODS_ROOT\b",
+    re.IGNORECASE,
+)
+MUTATING_SHELL_OPERATION_RE = re.compile(
+    r"(?:^|[\s;&|])(?:rm|rmdir|unlink|mv|cp|install|mkdir|mktemp|touch|tee|dd|"
+    r"truncate|ln|rsync|chmod|chown|tar|unzip|zip)(?:\s|$)|"
+    r"\bfind\b[\s\S]*\s-delete\b|\bsed\s+-[^\n]*i\b|\bperl\s+-[^\n]*i\b|"
+    r"(?:>|>>)\s*(?:(?:/app/)?methods/versions|(?:\./)?versions)(?:/|\b)",
+    re.IGNORECASE,
+)
+INTERPRETER_RE = re.compile(
+    r"(?:^|[\s;&|])(?:\S*/)?(?:python(?:3(?:\.\d+)?)?|pypy(?:3)?|node|perl|ruby|"
+    r"php|sh|bash)(?:\s|$)",
+    re.IGNORECASE,
+)
+PROGRAM_MUTATION_CUE_RE = re.compile(
+    r"(?:\b(?:subprocess\.(?:run|call|check_call|check_output|Popen)|os\.system)\s*\([^\n]*?"
+    r"[\"'](?:rm|rmdir|unlink|mv|cp|install|mkdir|touch|tee|dd|truncate|ln|rsync|chmod|chown)\b|"
+    r"\bos\.(?:remove|unlink|rename|replace|mkdir|makedirs)|"
+    r"shutil\.(?:copy|copy2|copyfile|copytree|move|rmtree)|"
+    r"pathlib\.[A-Za-z_]+\.?(?:mkdir|unlink|rename|replace)|"
+    r"(?:write_text|write_bytes|touch|mkdir|unlink|rename|replace)\s*\(|"
+    r"open\s*\([^\n]*,\s*[\"'](?:w|a|x|r\+))",
+    re.IGNORECASE,
+)
+VERSION_MUTATING_FS_TOOL_NAMES = {
+    "write", "edit", "delete", "remove", "move", "rename", "chmod",
+}
+
+
+def direct_version_mutation_kind(command: str) -> str | None:
+    """Classify a direct, model-issued version-ledger mutation attempt.
+
+    Plain inspection such as ``ls``/``cat``, hashing, and importing a solver
+    for a runtime benchmark remains allowed and does not appear here.  The
+    raw trace still records every such command for manual review.
+    """
+    if not VERSION_REFERENCE_RE.search(command):
+        return None
+    if MUTATING_SHELL_OPERATION_RE.search(command):
+        return "direct_shell_mutation"
+    if INTERPRETER_RE.search(command) and PROGRAM_MUTATION_CUE_RE.search(command):
+        return "program_execution_with_version_reference"
+    return None
+
+
+def direct_version_filesystem_mutation_kind(name: str, args: dict[str, Any]) -> str | None:
+    """Identify a native DSH filesystem-tool mutation of a snapshot path."""
+    if name not in VERSION_MUTATING_FS_TOOL_NAMES:
+        return None
+    rendered = json.dumps(args, ensure_ascii=False, sort_keys=True)
+    if VERSION_REFERENCE_RE.search(rendered):
+        return "filesystem_tool_mutation"
+    return None
+
 
 def load_json(path: Path, default: Any = None) -> Any:
     try:
@@ -89,6 +151,30 @@ def _clean_md_cell(value: str) -> str:
 def _parse_version_number(version: str) -> int:
     match = re.fullmatch(r"v([0-9]+)", version.strip())
     return int(match.group(1)) if match else -1
+
+
+def _successful_candidate_selfcheck(row: dict[str, Any]) -> bool:
+    """Mirror the authoritative checkpoint helper's eligibility rule.
+
+    ``version_checkpoints.json`` is the state machine, whereas
+    ``canonical_eligible`` is a *derived* field emitted only by
+    ``version_checkpoint.py audit --json``.  The review projection must derive
+    it from the state instead of looking for a non-existent state key.
+    """
+    selfcheck = row.get("selfcheck")
+    return (
+        isinstance(selfcheck, dict)
+        and selfcheck.get("return_code") == 0
+        and not bool(selfcheck.get("timed_out"))
+        and row.get("status") not in {"evaluating", "selfcheck_failed"}
+        and row.get("score") is not None
+    )
+
+
+def _canonical_target_eligible(version: str, row: dict[str, Any]) -> bool:
+    if version == "v0":
+        return row.get("status") in {"baseline", "submitted"}
+    return _successful_candidate_selfcheck(row)
 
 
 def _normalize_parent(value: str | None) -> str | None:
@@ -213,6 +299,10 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
     selfcheck_records: list[dict[str, Any]] = []
     cordis_related_calls = 0
     cordis_tool_calls = 0
+    cordis_define_calls = 0
+    cordis_run_calls = 0
+    cordis_define_successes = 0
+    cordis_run_successes = 0
     sandbox_backend_failures = 0
     tool_api_errors = 0
     bash_nonzero_calls = 0
@@ -222,6 +312,10 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
     direct_selfcheck_attempts = 0
     blocked_direct_selfcheck_attempts = 0
     unblocked_direct_selfcheck_executions = 0
+    direct_version_mutation_attempts = 0
+    blocked_direct_version_mutation_attempts = 0
+    unblocked_direct_version_mutations = 0
+    direct_version_mutation_events: list[dict[str, Any]] = []
     checkpoint_keep_calls = 0
     checkpoint_revert_calls = 0
     checkpoint_checkout_calls = 0
@@ -253,6 +347,14 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
             cordis_tool_calls += 1
         if "cordis" in name.lower() or "cordis" in rendered_args.lower():
             cordis_related_calls += 1
+        if name == "cordis_define":
+            cordis_define_calls += 1
+            if not bool(result.get("is_error")):
+                cordis_define_successes += 1
+        if name == "cordis_run":
+            cordis_run_calls += 1
+            if not bool(result.get("is_error")):
+                cordis_run_successes += 1
 
         command_text = str(args.get("command", "")) if name == "bash" else ""
         is_checkpoint_baseline = (
@@ -306,6 +408,35 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
             blocked_direct_selfcheck_attempts += 1
         if direct_selfcheck:
             unblocked_direct_selfcheck_executions += 1
+
+        version_mutation_kind = (
+            direct_version_mutation_kind(command_text)
+            if name == "bash"
+            else direct_version_filesystem_mutation_kind(name, args)
+        )
+        direct_version_mutation_attempt = version_mutation_kind is not None
+        direct_version_mutation_blocked = (
+            direct_version_mutation_attempt
+            and "BBO_DIRECT_VERSION_MUTATION_DENIED" in result_text
+        )
+        if direct_version_mutation_attempt:
+            direct_version_mutation_attempts += 1
+            direct_version_mutation_events.append(
+                {
+                    "call_id": call_id,
+                    "turn": call.get("turn"),
+                    "step": call.get("step"),
+                    "command": command_text,
+                    "kind": version_mutation_kind,
+                    "blocked": direct_version_mutation_blocked,
+                    "tool_api_error": bool(result.get("is_error")),
+                    "exit_code": exit_code,
+                }
+            )
+        if direct_version_mutation_blocked:
+            blocked_direct_version_mutation_attempts += 1
+        elif direct_version_mutation_attempt:
+            unblocked_direct_version_mutations += 1
         is_selfcheck = (
             direct_selfcheck
             or checkpoint_baseline_started
@@ -379,6 +510,10 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
         "direct_selfcheck_attempts": direct_selfcheck_attempts,
         "blocked_direct_selfcheck_attempts": blocked_direct_selfcheck_attempts,
         "unblocked_direct_selfcheck_executions": unblocked_direct_selfcheck_executions,
+        "direct_version_mutation_attempts": direct_version_mutation_attempts,
+        "blocked_direct_version_mutation_attempts": blocked_direct_version_mutation_attempts,
+        "unblocked_direct_version_mutations": unblocked_direct_version_mutations,
+        "direct_version_mutation_events": direct_version_mutation_events,
         "checkpoint_keep_calls": checkpoint_keep_calls,
         "checkpoint_revert_calls": checkpoint_revert_calls,
         "checkpoint_checkout_calls": checkpoint_checkout_calls,
@@ -389,6 +524,10 @@ def parse_trace(trace_path: Path) -> dict[str, Any]:
         "observed_selfcheck_executions": scored_selfcheck_executions + selfcheck_failed_tool_calls,
         "cordis_related_calls": cordis_related_calls,
         "cordis_tool_calls": cordis_tool_calls,
+        "cordis_define_calls": cordis_define_calls,
+        "cordis_run_calls": cordis_run_calls,
+        "cordis_define_successes": cordis_define_successes,
+        "cordis_run_successes": cordis_run_successes,
         "sandbox_backend_failures": sandbox_backend_failures,
         "selfchecks": selfcheck_records,
         "actions": action_rows,
@@ -513,6 +652,7 @@ def compute_bookkeeping(
     versions: list[dict[str, Any]],
     checkpoint_state: dict[str, Any] | None = None,
     final_solver: Path | None = None,
+    unblocked_direct_version_mutations: int = 0,
 ) -> dict[str, Any]:
     all_snapshot_dirs = (
         sorted((p.name for p in versions_dir.iterdir() if p.is_dir()))
@@ -587,16 +727,24 @@ def compute_bookkeeping(
         finalization_owner_complete = (
             finalized
             and finalized_by == "outer_harness"
-            and finalization_protocol == "outer-harness-last-explicitly-committed-canonical"
+            and finalization_protocol == "outer-harness-verifies-agent-committed-main"
         )
         final_version = checkpoint_state.get("final_version")
         auto_reverted_pending_versions = list(
             checkpoint_state.get("auto_reverted_pending_versions") or []
         )
-        canonical_eligible = bool(checkpoint_state.get("canonical_eligible", False))
-        invalid_committed_versions = list(
-            checkpoint_state.get("invalid_committed_versions") or []
+        canonical_row = manifest_map.get(canonical_version)
+        canonical_eligible = (
+            isinstance(canonical_version, str)
+            and isinstance(canonical_row, dict)
+            and _canonical_target_eligible(canonical_version, canonical_row)
         )
+        invalid_committed_versions = [
+            version
+            for version in manifest_candidate_versions
+            if manifest_map.get(version, {}).get("status") in {"kept", "submitted"}
+            and not _successful_candidate_selfcheck(manifest_map.get(version, {}))
+        ]
 
         for version in manifest_versions:
             row = manifest_map.get(version) or {}
@@ -642,13 +790,15 @@ def compute_bookkeeping(
     decision_complete = not undecided_versions and pending_version is None
     lineage_complete = not missing_parent_versions
 
-    checkpoint_guard_complete = snapshot_complete
+    direct_version_mutation_clean = unblocked_direct_version_mutations == 0
+    checkpoint_guard_complete = snapshot_complete and direct_version_mutation_clean
     if checkpoint_guard_present:
         checkpoint_guard_complete = checkpoint_guard_complete and (
             not missing_manifest_versions
             and not extra_manifest_versions
             and not snapshot_hash_mismatches
             and decision_complete
+            and not auto_reverted_pending_versions
             and lineage_complete
             and canonical_eligible
             and not invalid_committed_versions
@@ -679,6 +829,11 @@ def compute_bookkeeping(
         )
     if pending_version is not None:
         guard_failure_reasons.append("pending_version=" + str(pending_version))
+    if auto_reverted_pending_versions:
+        guard_failure_reasons.append(
+            "unexpected_outer_auto_revert="
+            + ",".join(auto_reverted_pending_versions)
+        )
     if missing_parent_versions:
         guard_failure_reasons.append(
             "missing_parent_versions=" + ",".join(missing_parent_versions)
@@ -706,6 +861,11 @@ def compute_bookkeeping(
             + f"submitted:{','.join(submitted_versions) or '<none>'};"
             + f"matching_final:{','.join(matching_final_versions) or '<none>'}"
         )
+    if not direct_version_mutation_clean:
+        guard_failure_reasons.append(
+            "unblocked_direct_version_mutations="
+            + str(unblocked_direct_version_mutations)
+        )
 
     return {
         "status": status,
@@ -731,6 +891,8 @@ def compute_bookkeeping(
         "snapshot_complete": snapshot_complete,
         "checkpoint_guard_present": checkpoint_guard_present,
         "checkpoint_guard_complete": checkpoint_guard_complete,
+        "direct_version_mutation_clean": direct_version_mutation_clean,
+        "unblocked_direct_version_mutations": unblocked_direct_version_mutations,
         "manifest_versions": manifest_versions,
         "manifest_candidate_versions": manifest_candidate_versions,
         "manifest_version_count": len(manifest_candidate_versions),
@@ -896,10 +1058,18 @@ def main() -> None:
     result_path = trial / "result.json"
 
     trace = parse_trace(trace_path)
+    trace["raw_trace_sha256"] = sha256_file(trace_path)
     versions = parse_experiment_log(experiment_log, versions_dir)
     checkpoint_state = load_json(checkpoint_state_path, {}) or {}
     adapter_bookkeeping = load_json(bookkeeping_path, {}) or {}
-    bookkeeping = compute_bookkeeping(experiment_log, versions_dir, versions, checkpoint_state, final_solver)
+    bookkeeping = compute_bookkeeping(
+        experiment_log,
+        versions_dir,
+        versions,
+        checkpoint_state,
+        final_solver,
+        unblocked_direct_version_mutations=trace["unblocked_direct_version_mutations"],
+    )
     bookkeeping["final_solver_exists"] = final_solver.is_file()
     score_details = load_json(score_details_path, {}) or {}
     grade_debug = load_json(grade_debug_path, {}) or {}
@@ -953,7 +1123,7 @@ def main() -> None:
     )
 
     summary = {
-        "review_schema_version": "0.8.2",
+        "review_schema_version": "1.1.0",
         "job_name": args.job_name,
         "condition": args.condition,
         "run_number": int(args.run_number),
@@ -989,6 +1159,9 @@ def main() -> None:
             "direct_selfcheck_attempts": trace["direct_selfcheck_attempts"],
             "blocked_direct_selfcheck_attempts": trace["blocked_direct_selfcheck_attempts"],
             "unblocked_direct_selfcheck_executions": trace["unblocked_direct_selfcheck_executions"],
+            "direct_version_mutation_attempts": trace["direct_version_mutation_attempts"],
+            "blocked_direct_version_mutation_attempts": trace["blocked_direct_version_mutation_attempts"],
+            "unblocked_direct_version_mutations": trace["unblocked_direct_version_mutations"],
             "checkpoint_keep_calls": trace["checkpoint_keep_calls"],
             "checkpoint_revert_calls": trace["checkpoint_revert_calls"],
             "checkpoint_checkout_calls": trace["checkpoint_checkout_calls"],
@@ -999,6 +1172,10 @@ def main() -> None:
             "observed_selfcheck_executions": trace["observed_selfcheck_executions"],
             "cordis_related_calls": trace["cordis_related_calls"],
             "cordis_tool_calls": trace["cordis_tool_calls"],
+            "cordis_define_calls": trace["cordis_define_calls"],
+            "cordis_run_calls": trace["cordis_run_calls"],
+            "cordis_define_successes": trace["cordis_define_successes"],
+            "cordis_run_successes": trace["cordis_run_successes"],
             "sandbox_backend_failures": trace["sandbox_backend_failures"],
             "bookkeeping_status": bookkeeping["status"],
             "logged_version_count": bookkeeping["logged_version_count"],
@@ -1008,6 +1185,7 @@ def main() -> None:
             "snapshot_complete": bookkeeping["snapshot_complete"],
             "checkpoint_guard_present": bookkeeping["checkpoint_guard_present"],
             "checkpoint_guard_complete": bookkeeping["checkpoint_guard_complete"],
+            "direct_version_mutation_clean": bookkeeping["direct_version_mutation_clean"],
             "manifest_version_count": bookkeeping["manifest_version_count"],
             "snapshot_hash_mismatches": bookkeeping["snapshot_hash_mismatches"],
             "canonical_version": bookkeeping["canonical_version"],
@@ -1095,6 +1273,9 @@ def main() -> None:
         f"- direct selfcheck attempts: `{trace['direct_selfcheck_attempts']}`",
         f"- blocked direct selfcheck attempts: `{trace['blocked_direct_selfcheck_attempts']}`",
         f"- unblocked direct selfcheck executions: `{trace['unblocked_direct_selfcheck_executions']}`",
+        f"- direct version-ledger mutation attempts: `{trace['direct_version_mutation_attempts']}`",
+        f"- blocked direct version-ledger mutation attempts: `{trace['blocked_direct_version_mutation_attempts']}`",
+        f"- unblocked direct version-ledger mutations (must be zero): `{trace['unblocked_direct_version_mutations']}`",
         f"- checkpoint keep calls: `{trace['checkpoint_keep_calls']}`",
         f"- checkpoint revert calls: `{trace['checkpoint_revert_calls']}`",
         f"- checkpoint checkout calls: `{trace['checkpoint_checkout_calls']}`",
@@ -1105,6 +1286,10 @@ def main() -> None:
         f"- observed selfcheck executions: `{trace['observed_selfcheck_executions']}`",
         f"- Cordis-related calls: `{trace['cordis_related_calls']}`",
         f"- Cordis tool calls: `{trace['cordis_tool_calls']}`",
+        f"- Cordis define calls: `{trace['cordis_define_calls']}`",
+        f"- Cordis run calls: `{trace['cordis_run_calls']}`",
+        f"- successful Cordis definitions: `{trace['cordis_define_successes']}`",
+        f"- successful Cordis runs: `{trace['cordis_run_successes']}`",
         f"- sandbox backend failures: `{trace['sandbox_backend_failures']}`",
         f"- bookkeeping status: **{bookkeeping['status']}**",
         f"- logged candidate versions: `{bookkeeping['logged_version_count']}`",
@@ -1112,6 +1297,7 @@ def main() -> None:
         f"- snapshot complete: `{bookkeeping['snapshot_complete']}`",
         f"- checkpoint guard present: `{bookkeeping['checkpoint_guard_present']}`",
         f"- checkpoint guard complete: `{bookkeeping['checkpoint_guard_complete']}`",
+        f"- version-ledger mutation route clean: `{bookkeeping['direct_version_mutation_clean']}`",
         f"- manifest candidate versions: `{bookkeeping['manifest_version_count']}`",
         f"- snapshot hash mismatches: `{bookkeeping['snapshot_hash_mismatches']}`",
         f"- canonical version: `{bookkeeping['canonical_version']}`",
@@ -1134,9 +1320,9 @@ def main() -> None:
         f"- incomplete snapshot dirs (missing solver.py): `{bookkeeping['incomplete_snapshot_versions']}`",
         f"- noncanonical snapshot dirs: `{bookkeeping['noncanonical_snapshot_dirs']}`",
         f"- guard failure reasons: `{bookkeeping['guard_failure_reasons']}`",
-        f"- auto-reverted uncommitted pending versions at handoff: `{bookkeeping['auto_reverted_pending_versions']}`",
+        f"- outer auto-reverted versions (must be empty): `{bookkeeping['auto_reverted_pending_versions']}`",
         "",
-        "See `agent-actions.md` for the observable action path and `version-history.csv` for the logged version history.",
+        "`agent-trace.jsonl.zstd` is the verbatim, ordered DSH event stream (model messages/thinking chunks, actions, tool calls, and tool results) and is the authoritative record. `agent-actions.md` is only a readable projection of tool actions. See `version-history.csv` for the logged version history.",
     ]
     if best_visible:
         summary_md.extend(
@@ -1164,8 +1350,9 @@ def main() -> None:
         )
     (out_dir / "README.md").write_text("\n".join(summary_md) + "\n", encoding="utf-8")
 
-    # Human-review essentials. Keep the raw Harbor tree untouched; review/ is the
-    # curated surface. Large trace uses a hard link when possible to avoid extra disk.
+    # The raw DSH event stream is preserved verbatim and in event order; the
+    # review projection never replaces it. Large trace uses a hard link when
+    # possible to avoid extra disk.
     hardlink_or_copy(trace_path, out_dir / "agent-trace.jsonl.zstd")
     copy_if_nonempty(experiment_log, out_dir / "experiment_log.md")
     copy_if_nonempty(checkpoint_state_path, out_dir / "version_checkpoints.json")
@@ -1173,6 +1360,14 @@ def main() -> None:
     copy_if_nonempty(score_details_path, out_dir / "verifier-score-details.json")
     copy_if_nonempty(trial / "formal_protocol.txt", out_dir / "meta/formal_protocol.txt")
     copy_if_nonempty(trial / "agent/effective-config.yml", out_dir / "meta/effective-config.yml")
+    copy_if_nonempty(
+        trial / "agent/rendered-autoresearch-prompt.md",
+        out_dir / "meta/rendered-autoresearch-prompt.md",
+    )
+    copy_if_nonempty(
+        trial / "agent/rendered-prompt.sha256",
+        out_dir / "meta/rendered-prompt.sha256",
+    )
     copy_if_nonempty(trial / "agent/prompt-source.txt", out_dir / "meta/prompt-source.txt")
     copy_if_nonempty(trial / "agent/dsh.stdout.log", out_dir / "meta/dsh.stdout.log")
     copy_if_nonempty(trial / "agent/dsh.stderr.log", out_dir / "meta/dsh.stderr.log")

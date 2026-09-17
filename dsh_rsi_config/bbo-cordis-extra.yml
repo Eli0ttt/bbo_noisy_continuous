@@ -2,5 +2,9 @@
 - insert:
     - id: cordis-host-runner
       name: '@deepseek-ai/dsh-cordis-host-runner'
+      config:
+        # Official host-runner default, pinned here so the experiment does not
+        # silently change when a future DSH release changes that default.
+        vmTimeoutMs: 5000
     - id: tool-cordis
       name: '@deepseek-ai/dsh-tool-cordis'

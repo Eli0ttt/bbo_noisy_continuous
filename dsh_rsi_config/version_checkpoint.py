@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "3.2"
+SCHEMA_VERSION = "3.3"
 VERSION_RE = re.compile(r"v[0-9]+")
 FINAL_STATUSES = {"kept", "reverted", "submitted", "baseline"}
 PENDING_STATUSES = {"evaluating", "evaluated", "selfcheck_failed"}
@@ -142,8 +142,8 @@ def write_experiment_log(state: dict[str, Any]) -> None:
         "version is snapshotted before its official visible selfcheck. After each",
         "versioned selfcheck, the live solver is restored to the canonical parent until",
         "the agent explicitly keeps the candidate. Intermediate versions must be kept or",
-        "reverted before another versioned evaluation; an unresolved candidate is",
-        "transactionally rolled back at handoff and the last canonical checkpoint is submitted.",
+        "reverted before another versioned evaluation; an unresolved candidate prevents",
+        "handoff. The outer harness submits only after verifying the agent's committed main.",
         "",
         "| Version | Parent | Description | Score | Anytime | Final | Status | Decision note | Solver SHA256 |",
         "|---|---|---|---:|---:|---:|---|---|---|",
@@ -815,6 +815,9 @@ def audit_payload() -> dict[str, Any]:
         guard_failure_reasons.append(
             "pending_version=" + str(state.get("pending_version"))
         )
+    auto_reverted = list(state.get("auto_reverted_pending_versions") or [])
+    if auto_reverted:
+        guard_failure_reasons.append("unexpected_outer_auto_revert=" + ",".join(auto_reverted))
     if missing_parent_versions:
         guard_failure_reasons.append(
             "missing_parent_versions=" + ",".join(missing_parent_versions)
@@ -832,13 +835,13 @@ def audit_payload() -> dict[str, Any]:
     finalization_owner_complete = (
         bool(state.get("finalized"))
         and finalized_by == "outer_harness"
-        and finalization_protocol == "outer-harness-last-explicitly-committed-canonical"
+        and finalization_protocol == "outer-harness-verifies-agent-committed-main"
     )
     if not state.get("finalized"):
         guard_failure_reasons.append("state_not_finalized")
     elif finalized_by != "outer_harness":
         guard_failure_reasons.append("invalid_finalization_owner=" + repr(finalized_by))
-    elif finalization_protocol != "outer-harness-last-explicitly-committed-canonical":
+    elif finalization_protocol != "outer-harness-verifies-agent-committed-main":
         guard_failure_reasons.append(
             "invalid_finalization_protocol=" + repr(finalization_protocol)
         )
@@ -852,6 +855,7 @@ def audit_payload() -> dict[str, Any]:
     checkpoint_guard_complete = (
         snapshot_complete
         and decision_complete
+        and not list(state.get("auto_reverted_pending_versions") or [])
         and lineage_complete
         and not invalid_committed_versions
         and canonical_eligible
@@ -902,7 +906,7 @@ def audit_payload() -> dict[str, Any]:
         "submitted_matches_final": submitted_matches_final,
         "snapshot_complete": snapshot_complete,
         "guard_failure_reasons": guard_failure_reasons,
-        "auto_reverted_pending_versions": list(state.get("auto_reverted_pending_versions") or []),
+        "auto_reverted_pending_versions": auto_reverted,
         "checkpoint_guard_complete": checkpoint_guard_complete,
     }
 

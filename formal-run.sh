@@ -51,7 +51,7 @@ export DEEPSEEK_ALLOW_AGENT_HOST="${DEEPSEEK_ALLOW_AGENT_HOST:-183.230.173.202}"
 export HARBOR_BIN="${HARBOR_BIN:-$HOME/.local/share/uv/tools/harbor/bin/harbor}"
 export HARBOR_PY="${HARBOR_PY:-$HOME/.local/share/uv/tools/harbor/bin/python}"
 export NODE_ROOT="${NODE_ROOT:-$HOME/.nvm/versions/node/v22.23.2}"
-export EXPECTED_AGENT_VERSION="0.8.2-official-autoresearch-complete-visible-ledger"
+export EXPECTED_AGENT_VERSION="1.1.0-task-equivalent-version-ledger-guarded"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "missing environment file: $ENV_FILE" >&2
@@ -220,8 +220,9 @@ BASE_URL_SHA256=$(printf '%s' "$DEEPSEEK_BASE_URL" | sha256sum | awk '{print $1}
   echo "visible_selfcheck_protocol=checkpoint-helper-only"
   echo "bookkeeping_checkpoint_guard=1"
   echo "version_checkpoint_protocol=transactional-complete-visible-ledger"
+  echo "version_directory_guard=helper-only"
   echo "version_decision_protocol=resolve-before-next-version"
-  echo "final_submission_protocol=outer-harness-last-explicitly-committed-canonical"
+  echo "final_submission_protocol=outer-harness-verifies-agent-committed-main"
   echo "finalization_owner=outer_harness"
   echo "no_cordis_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-no-cordis.yml" | awk '{print $1}')"
   echo "cordis_extra_config_sha256=$(sha256sum "$CONFIG_ROOT/bbo-cordis-extra.yml" | awk '{print $1}')"
@@ -285,13 +286,17 @@ required = {
     "condition": condition,
     "official_prompt_protocol": True,
     "rendered_autoresearch_prompt": True,
+    "task_prompt_addendum_bytes": 0,
+    "cordis_treatment": "available-not-required",
     "single_persistent_session": True,
     "bookkeeping_checkpoint_guard": True,
     "version_checkpoint_protocol": "transactional-complete-visible-ledger",
     "visible_selfcheck_protocol": "checkpoint-helper-only",
     "direct_selfcheck_guard": True,
+    "version_directory_guard": True,
+    "version_directory_protocol": "checkpoint-helper-only",
     "version_decision_protocol": "resolve-before-next-version",
-    "final_submission_protocol": "outer-harness-last-explicitly-committed-canonical",
+    "final_submission_protocol": "outer-harness-verifies-agent-committed-main",
     "checkpoint_guard_complete": True,
     "decision_complete": True,
     "lineage_complete": True,
@@ -346,15 +351,54 @@ VERSION_CHECKPOINT_STATE="$TRIAL/artifacts/app/methods/version_checkpoints.json"
 VERIFIER_SCORE_DETAILS="$TRIAL/verifier/score_details.json"
 VERIFIER_GRADE_DEBUG="$TRIAL/verifier/grade_debug.json"
 EFFECTIVE_CONFIG="$TRIAL/agent/effective-config.yml"
+AGENT_RENDERED_PROMPT="$TRIAL/agent/rendered-autoresearch-prompt.md"
+AGENT_RENDERED_PROMPT_SHA="$TRIAL/agent/rendered-prompt.sha256"
+PROMPT_SOURCE="$TRIAL/agent/prompt-source.txt"
 
 for required in \
   "$EFFECTIVE_CONFIG" \
+  "$AGENT_RENDERED_PROMPT" \
+  "$AGENT_RENDERED_PROMPT_SHA" \
+  "$PROMPT_SOURCE" \
   "$AGENT_AUTORESEARCH_AUDIT" \
   "$VERSION_CHECKPOINT_STATE" \
   "$VERIFIER_SCORE_DETAILS" \
   "$VERIFIER_GRADE_DEBUG"; do
   test -f "$required" || { echo "missing required formal artifact: $required" >&2; exit 1; }
 done
+
+"$HARBOR_PY" - "$ARB_PROMPT_TEMPLATE" "$TASK_ROOT/instruction.md" "$AGENT_RENDERED_PROMPT" "$AGENT_RENDERED_PROMPT_SHA" "$PROMPT_SOURCE" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+template, instruction, rendered, digest, source = map(Path, sys.argv[1:])
+expected = template.read_text(encoding="utf-8").replace(
+    "{{ instruction }}", instruction.read_text(encoding="utf-8")
+)
+actual = rendered.read_text(encoding="utf-8")
+if actual != expected:
+    raise SystemExit("FORMAL_RENDERED_PROMPT_FAIL rendered task prompt differs from official output")
+actual_sha = hashlib.sha256(actual.encode("utf-8")).hexdigest()
+if digest.read_text(encoding="utf-8").strip() != actual_sha:
+    raise SystemExit("FORMAL_RENDERED_PROMPT_FAIL digest mismatch")
+fields = dict(
+    line.split("=", 1)
+    for line in source.read_text(encoding="utf-8").splitlines()
+    if "=" in line
+)
+required = {
+    "bookkeeping_addendum_bytes": "0",
+    "condition_addendum_bytes": "0",
+    "prompt_exact_match": "true",
+    "rendering": "official template literal replacement only",
+    "rendered_sha256": actual_sha,
+}
+for key, value in required.items():
+    if fields.get(key) != value:
+        raise SystemExit(f"FORMAL_RENDERED_PROMPT_FAIL {key}={fields.get(key)!r} expected={value!r}")
+print("FORMAL_RENDERED_PROMPT_PASS sha256=" + actual_sha)
+PY
 
 mapfile -t TRACE_FILES < <(
   find "$TRIAL/artifacts/logs/artifacts/dsh-home/sessions" \
@@ -394,13 +438,15 @@ for required in \
   "$RUNTIME_AUDIT" \
   "$REVIEW_DIR/final_solver.py" \
   "$REVIEW_DIR/version_checkpoints.json" \
+  "$REVIEW_DIR/meta/rendered-autoresearch-prompt.md" \
+  "$REVIEW_DIR/meta/rendered-prompt.sha256" \
   "$REVIEW_DIR/agent-trace.jsonl.zstd"; do
   test -f "$required" || { echo "missing review artifact: $required" >&2; exit 1; }
 done
 
 # Trace/runtime diagnostics are descriptive. Version checkpoint fidelity is a
 # hard pre-verifier contract in agent v0.8.0 and is rechecked here post-hoc.
-read -r TRACE_SELFCHECKS TRACE_FAILED TRACE_DIRECT_ATTEMPTS TRACE_DIRECT_BLOCKED TRACE_DIRECT_UNBLOCKED TRACE_LLM_RETRIES TRACE_TOOL_ERRORS TRACE_BASH_NONZERO TRACE_CORDIS TRACE_SANDBOX < <(
+read -r TRACE_SELFCHECKS TRACE_FAILED TRACE_DIRECT_ATTEMPTS TRACE_DIRECT_BLOCKED TRACE_DIRECT_UNBLOCKED TRACE_VERSION_ATTEMPTS TRACE_VERSION_BLOCKED TRACE_VERSION_UNBLOCKED TRACE_LLM_RETRIES TRACE_TOOL_ERRORS TRACE_BASH_NONZERO TRACE_CORDIS_RELATED TRACE_CORDIS_TOOLS TRACE_CORDIS_DEFINE_OK TRACE_CORDIS_RUN_OK TRACE_SANDBOX < <(
   "$HARBOR_PY" - "$TRACE_AUDIT" <<'PY'
 import json, sys
 x=json.load(open(sys.argv[1]))
@@ -410,10 +456,16 @@ print(
     x.get('direct_selfcheck_attempts', 0),
     x.get('blocked_direct_selfcheck_attempts', 0),
     x.get('unblocked_direct_selfcheck_executions', 0),
+    x.get('direct_version_mutation_attempts', 0),
+    x.get('blocked_direct_version_mutation_attempts', 0),
+    x.get('unblocked_direct_version_mutations', 0),
     x.get('llm_retry_events', 0),
     x.get('tool_api_errors', 0),
     x.get('bash_nonzero_calls', 0),
     x.get('cordis_related_calls', 0),
+    x.get('cordis_tool_calls', 0),
+    x.get('cordis_define_successes', 0),
+    x.get('cordis_run_successes', 0),
     x.get('sandbox_backend_failures', 0),
 )
 PY
@@ -423,14 +475,30 @@ if [ "$TRACE_DIRECT_UNBLOCKED" -ne 0 ]; then
   echo "FORMAL_DIRECT_SELFCHECK_ROUTE_FAIL unblocked_direct_selfchecks=$TRACE_DIRECT_UNBLOCKED" >&2
   exit 1
 fi
+if [ "$TRACE_VERSION_UNBLOCKED" -ne 0 ]; then
+  echo "FORMAL_DIRECT_VERSION_MUTATION_ROUTE_FAIL unblocked_direct_version_mutations=$TRACE_VERSION_UNBLOCKED" >&2
+  exit 1
+fi
 if [ "$TRACE_SANDBOX" -ne 0 ]; then
   echo "FORMAL_INFRASTRUCTURE_AUDIT_FAIL sandbox_backend_failures=$TRACE_SANDBOX" >&2
   exit 1
 fi
-if [ "$CONDITION" = "no-cordis" ] && [ "$TRACE_CORDIS" -ne 0 ]; then
-  echo "FORMAL_TREATMENT_AUDIT_FAIL unexpected_cordis_calls=$TRACE_CORDIS" >&2
-  exit 1
+# Treatment validity is capability-based: dynamic-cordis makes the official
+# Cordis tool/host-runner pair available, while no-cordis does not. Whether the
+# model actually calls Cordis is an observed outcome, never a pass criterion.
+CORDIS_TOOL_NAME='@deepseek-ai/dsh-tool-cordis'
+CORDIS_RUNNER_NAME='@deepseek-ai/dsh-cordis-host-runner'
+if [ "$CONDITION" = "dynamic-cordis" ]; then
+  grep -Fq -- "$CORDIS_TOOL_NAME" "$EFFECTIVE_CONFIG"
+  grep -Fq -- "$CORDIS_RUNNER_NAME" "$EFFECTIVE_CONFIG"
+else
+  if grep -Fq -- "$CORDIS_TOOL_NAME" "$EFFECTIVE_CONFIG" || grep -Fq -- "$CORDIS_RUNNER_NAME" "$EFFECTIVE_CONFIG"; then
+    echo "FORMAL_TREATMENT_CONFIG_FAIL Cordis dynamic components present in no-cordis" >&2
+    exit 1
+  fi
 fi
+printf 'FORMAL_TREATMENT_CONFIG_PASS condition=%s cordis_related_calls=%s cordis_tool_calls=%s cordis_define_successes=%s cordis_run_successes=%s\n' \
+  "$CONDITION" "$TRACE_CORDIS_RELATED" "$TRACE_CORDIS_TOOLS" "$TRACE_CORDIS_DEFINE_OK" "$TRACE_CORDIS_RUN_OK"
 
 read -r BOOKKEEPING_STATUS LOGGED_VERSIONS SNAPSHOT_VERSIONS SNAPSHOT_COMPLETE CHECKPOINT_GUARD DECISION_COMPLETE LINEAGE_COMPLETE CANONICAL_ELIGIBLE INVALID_COMMITTED FINALIZED FINALIZATION_OWNER_COMPLETE MISSING_SNAPSHOTS HASH_MISMATCHES < <(
   "$HARBOR_PY" - "$BOOKKEEPING_AUDIT" <<'PY'
@@ -471,16 +539,15 @@ PY
 
 printf 'FORMAL_AUTORESEARCH_AUDIT status=%s logged_versions=%s snapshot_versions=%s snapshot_complete=%s checkpoint_guard_complete=%s decision_complete=%s lineage_complete=%s canonical_eligible=%s invalid_committed=%s finalized=%s finalization_owner_complete=%s missing_snapshots=%s hash_mismatches=%s\n' \
   "$BOOKKEEPING_STATUS" "$LOGGED_VERSIONS" "$SNAPSHOT_VERSIONS" "$SNAPSHOT_COMPLETE" "$CHECKPOINT_GUARD" "$DECISION_COMPLETE" "$LINEAGE_COMPLETE" "$CANONICAL_ELIGIBLE" "$INVALID_COMMITTED" "$FINALIZED" "$FINALIZATION_OWNER_COMPLETE" "$MISSING_SNAPSHOTS" "$HASH_MISMATCHES"
-printf 'FORMAL_TRACE_AUDIT scored_selfchecks=%s failed_selfcheck_tool_calls=%s direct_selfcheck_attempts=%s blocked_direct_selfchecks=%s unblocked_direct_selfchecks=%s llm_retries=%s tool_api_errors=%s bash_nonzero_calls=%s cordis_calls=%s\n' \
-  "$TRACE_SELFCHECKS" "$TRACE_FAILED" "$TRACE_DIRECT_ATTEMPTS" "$TRACE_DIRECT_BLOCKED" "$TRACE_DIRECT_UNBLOCKED" "$TRACE_LLM_RETRIES" "$TRACE_TOOL_ERRORS" "$TRACE_BASH_NONZERO" "$TRACE_CORDIS"
+printf 'FORMAL_TRACE_AUDIT scored_selfchecks=%s failed_selfcheck_tool_calls=%s direct_selfcheck_attempts=%s blocked_direct_selfchecks=%s unblocked_direct_selfchecks=%s direct_version_mutation_attempts=%s blocked_direct_version_mutations=%s unblocked_direct_version_mutations=%s llm_retries=%s tool_api_errors=%s bash_nonzero_calls=%s cordis_related_calls=%s cordis_tool_calls=%s cordis_define_successes=%s cordis_run_successes=%s\n' \
+  "$TRACE_SELFCHECKS" "$TRACE_FAILED" "$TRACE_DIRECT_ATTEMPTS" "$TRACE_DIRECT_BLOCKED" "$TRACE_DIRECT_UNBLOCKED" "$TRACE_VERSION_ATTEMPTS" "$TRACE_VERSION_BLOCKED" "$TRACE_VERSION_UNBLOCKED" "$TRACE_LLM_RETRIES" "$TRACE_TOOL_ERRORS" "$TRACE_BASH_NONZERO" "$TRACE_CORDIS_RELATED" "$TRACE_CORDIS_TOOLS" "$TRACE_CORDIS_DEFINE_OK" "$TRACE_CORDIS_RUN_OK"
 printf 'FORMAL_RUNTIME_AUDIT status=%s elapsed_sec=%s budget_sec=%s margin_sec=%s utilization_pct=%s\n' \
   "$RUNTIME_STATUS" "$RUNTIME_ELAPSED" "$RUNTIME_BUDGET" "$RUNTIME_MARGIN" "$RUNTIME_UTIL"
 
-# v0.8.2 keeps every scored visible evaluation on the helper ledger and makes finalization outer-harness-owned. Every
-# intermediate version must be explicitly kept/reverted before the next
-# versioned evaluation, while final submission is derived deterministically
-# from the exact final artifact. By the time hidden verification completes all
-# bookkeeping invariants must therefore be true.
+# The helper preserves the official experiment-log/snapshot semantics. Every
+# scored visible candidate is immutable, every decision is explicit, and the
+# outer harness only verifies the agent-committed main artifact at handoff.
+# By hidden verification time, these reproducibility invariants must hold.
 if [ "$SNAPSHOT_COMPLETE" -ne 1 ] || [ "$CHECKPOINT_GUARD" -ne 1 ] || [ "$DECISION_COMPLETE" -ne 1 ] || [ "$LINEAGE_COMPLETE" -ne 1 ] || [ "$CANONICAL_ELIGIBLE" -ne 1 ] || [ "$INVALID_COMMITTED" -ne 0 ] || [ "$FINALIZED" -ne 1 ] || [ "$FINALIZATION_OWNER_COMPLETE" -ne 1 ] || [ "$HASH_MISMATCHES" -ne 0 ]; then
   echo "FORMAL_BOOKKEEPING_AUDIT_FAIL snapshot_complete=$SNAPSHOT_COMPLETE checkpoint_guard_complete=$CHECKPOINT_GUARD decision_complete=$DECISION_COMPLETE lineage_complete=$LINEAGE_COMPLETE canonical_eligible=$CANONICAL_ELIGIBLE invalid_committed=$INVALID_COMMITTED finalized=$FINALIZED finalization_owner_complete=$FINALIZATION_OWNER_COMPLETE missing_snapshots=$MISSING_SNAPSHOTS hash_mismatches=$HASH_MISMATCHES" >&2
   exit 1
@@ -511,6 +578,8 @@ printf 'EXPERIMENT_LOG=%s\n' "$REVIEW_DIR/experiment_log.md"
 printf 'FINAL_SOLVER=%s\n' "$REVIEW_DIR/final_solver.py"
 printf 'VERSIONS_DIR=%s\n' "$REVIEW_DIR/versions"
 printf 'VERSION_CHECKPOINTS=%s\n' "$REVIEW_DIR/version_checkpoints.json"
+printf 'RENDERED_AUTORESEARCH_PROMPT=%s\n' "$REVIEW_DIR/meta/rendered-autoresearch-prompt.md"
+printf 'RENDERED_PROMPT_SHA256=%s\n' "$REVIEW_DIR/meta/rendered-prompt.sha256"
 printf 'AGENT_TRACE_FILE=%s\n' "$REVIEW_DIR/agent-trace.jsonl.zstd"
 printf 'TRACE_AUDIT=%s\n' "$TRACE_AUDIT"
 printf 'BOOKKEEPING_AUDIT=%s\n' "$BOOKKEEPING_AUDIT"
