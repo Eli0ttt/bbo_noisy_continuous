@@ -1,0 +1,25 @@
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      research-reviewer:
+        displayName: Research Reviewer
+        apiKeyEnv: AGENT_B_API_KEY
+        api: openai-completions
+        baseURL: !!js process.env.AGENT_B_BASE_URL
+        models:
+          - id: !!js process.env.AGENT_B_MODEL
+            name: Research Reviewer model
+            contextWindow: 131072
+            maxTokens: 8192
+            reasoningEfforts:
+              low: low
+              high: high
+              max: max
+            compat:
+              maxTokensField: max_tokens
+- id: agent-default-model
+  config:
+    provider: research-reviewer
+    model: !!js process.env.AGENT_B_MODEL
+    reasoningEffort: low

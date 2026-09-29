@@ -13,24 +13,33 @@ runs/
 *.agent-trace.manifest.txt
 *.protocol.txt
 
-# Local derived task staging. Keep it on the experiment machine because the
-# current formal-run.sh uses it, but do not duplicate it in the custom-code repo.
+# Local derived task staging
+# Keep it on the experiment machine because formal-run.sh uses it,
+# but do not duplicate it in the custom-code repo.
 dsh_rsi_runs/
 
-# Local checkout of the official RSI-Exam infrastructure. Keep it locally for
-# formal-run.sh; track it later as a real Git submodule if desired.
+# Official RSI-Exam infrastructure
+# Keep the local checkout for formal-run.sh; track it later as a real
+# Git submodule if desired.
 official_rsi/
 
-# Python/editor caches
+# Local installation / image bundles
+packages/
+
+# Python caches / compiled files
 __pycache__/
 **/__pycache__/
 *.py[cod]
-.DS_Store
 
-# Local scratch/backups
+# Logs
+*.log
+
+# Temporary / backup files
 *.tmp
 *.bak
 *~
 
-# Local installation/image bundles
-packages/
+# OS / editor files
+.DS_Store
+.vscode/
+.idea/

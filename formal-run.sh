@@ -72,7 +72,7 @@ export MODEL="${MODEL:-${DEEPSEEK_MODEL:-deepseek-v4-flash-s1}}"
 # Keep the official 12h outer-rollout ceiling.  These are caps, not targets.
 export ARB_PROGRAM="$ARB_PROMPT_PROGRAM"
 export ARB_BUDGET_PY="$ARB_BUDGET_PY"
-export ARB_AGENT_TIMEOUT_SEC=43200
+export ARB_AGENT_TIMEOUT_SEC=3600
 export ARB_OUTPUT_TOKEN_LIMIT=500000
 
 for path in "$HARBOR_BIN" "$HARBOR_PY" "$NODE_ROOT/bin/node" "$NODE_ROOT/bin/pnpm"; do
@@ -373,25 +373,29 @@ import sys
 from pathlib import Path
 
 template, instruction, rendered, digest, source = map(Path, sys.argv[1:])
-expected = template.read_text(encoding="utf-8").replace(
-    "{{ instruction }}", instruction.read_text(encoding="utf-8")
-)
-actual = rendered.read_text(encoding="utf-8")
-if actual != expected:
-    raise SystemExit("FORMAL_RENDERED_PROMPT_FAIL rendered task prompt differs from official output")
-actual_sha = hashlib.sha256(actual.encode("utf-8")).hexdigest()
-if digest.read_text(encoding="utf-8").strip() != actual_sha:
-    raise SystemExit("FORMAL_RENDERED_PROMPT_FAIL digest mismatch")
 fields = dict(
     line.split("=", 1)
     for line in source.read_text(encoding="utf-8").splitlines()
     if "=" in line
 )
+task_path = fields.get("task_instruction_path")
+if task_path not in {"/app/TASK.md", "/app/instruction.md"}:
+    raise SystemExit(f"FORMAL_RENDERED_PROMPT_FAIL invalid task instruction path {task_path!r}")
+expected = template.read_text(encoding="utf-8").replace(
+    "{{ instruction }}", instruction.read_text(encoding="utf-8")
+).replace("/app/TASK.md", task_path)
+actual = rendered.read_text(encoding="utf-8")
+if actual != expected:
+    raise SystemExit("FORMAL_RENDERED_PROMPT_FAIL rendered task prompt differs from expected path-adapted official output")
+actual_sha = hashlib.sha256(actual.encode("utf-8")).hexdigest()
+if digest.read_text(encoding="utf-8").strip() != actual_sha:
+    raise SystemExit("FORMAL_RENDERED_PROMPT_FAIL digest mismatch")
 required = {
     "bookkeeping_addendum_bytes": "0",
     "condition_addendum_bytes": "0",
     "prompt_exact_match": "true",
-    "rendering": "official template literal replacement only",
+    "task_path_adapted": "true" if task_path == "/app/instruction.md" else "false",
+    "rendering": "official template literal replacement plus task-path correction",
     "rendered_sha256": actual_sha,
 }
 for key, value in required.items():

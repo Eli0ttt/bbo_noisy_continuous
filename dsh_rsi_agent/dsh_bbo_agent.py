@@ -29,7 +29,7 @@ class DshBboAgent(BaseAgent):
     _CORDIS_PATCH = "/opt/dsh-config/bbo-cordis-extra.yml"
     _CHECKPOINT_HELPER = "/opt/dsh-config/version_checkpoint.py"
     _SELFCHECK_GUARD = "/opt/dsh-config/bbo-selfcheck-guard.mjs"
-    _VERSION = "1.1.0-task-equivalent-version-ledger-guarded"
+    _VERSION = "1.2.0-task-path-adaptive-version-ledger-guarded"
     _PROMPT_PLACEHOLDER = "{{ instruction }}"
     _HANDOFF_FINALIZER_SOURCE = r"""from __future__ import annotations
 import datetime as _dt, fcntl, hashlib, json, os, sys
@@ -182,6 +182,7 @@ except Exception as exc:
             else None
         )
         self._task_instruction_on_disk: str | None = None
+        self._task_instruction_path: str | None = None
         self._bookkeeping_audit: dict[str, Any] = {}
 
     @staticmethod
@@ -305,12 +306,12 @@ except Exception as exc:
 
     def _render_official_prompt(self, instruction: str) -> str:
         if self._task_instruction_on_disk is None:
-            raise RuntimeError("setup() did not cache /app/TASK.md")
+            raise RuntimeError("setup() did not cache the task instruction file")
         if self._normalize_text(instruction) != self._normalize_text(
             self._task_instruction_on_disk
         ):
             raise RuntimeError(
-                "Harbor-provided instruction differs from /app/TASK.md; refusing "
+                f"Harbor-provided instruction differs from {self._task_instruction_path}; refusing "
                 "to run a protocol-drifted formal rollout"
             )
 
@@ -323,9 +324,12 @@ except Exception as exc:
         official_rendered = template.replace(
             self._PROMPT_PLACEHOLDER, self._task_instruction_on_disk
         )
-        rendered = official_rendered
-        if rendered != official_rendered:
-            raise RuntimeError("rendered task prompt diverged from official template output")
+        # Harbor task images may expose the same packaged task instruction as
+        # /app/instruction.md rather than RSI's Docker /app/TASK.md mount.
+        # Keep the official prompt body intact while correcting only that path
+        # reference to the file actually present in this task image.
+        actual_path = self._task_instruction_path or "/app/TASK.md"
+        rendered = official_rendered.replace("/app/TASK.md", actual_path)
         template_sha = hashlib.sha256(template.encode("utf-8")).hexdigest()
         task_sha = hashlib.sha256(self._task_instruction_on_disk.encode("utf-8")).hexdigest()
         rendered_sha = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
@@ -341,8 +345,10 @@ except Exception as exc:
                     "bookkeeping_addendum_bytes=0",
                     "condition_addendum_bytes=0",
                     "prompt_exact_match=true",
+                    f"task_instruction_path={actual_path}",
+                    f"task_path_adapted={'true' if actual_path != '/app/TASK.md' else 'false'}",
                     f"rendered_sha256={rendered_sha}",
-                    "rendering=official template literal replacement only",
+                    "rendering=official template literal replacement plus task-path correction",
                     "",
                 ]
             ),
@@ -420,11 +426,10 @@ except Exception as exc:
             f"test -f {shlex.quote(self._CHECKPOINT_HELPER)}",
             f"test -f {shlex.quote(self._SELFCHECK_GUARD)}",
             "test -f /app/AUTORESEARCH.md",
-            "test -f /app/TASK.md",
             "test -f /app/budget.py",
             "test -f /app/selfcheck.py",
             "test -f /app/methods/main/solver.py",
-            "sha256sum /app/AUTORESEARCH.md /app/TASK.md /app/budget.py",
+            "sha256sum /app/AUTORESEARCH.md /app/budget.py",
         ]
         if self.condition == "dynamic-cordis":
             checks.append(f"test -f {shlex.quote(self._CORDIS_PATCH)}")
@@ -465,19 +470,33 @@ except Exception as exc:
                 f"runner_present={cordis_runner_present}"
             )
 
-        # Cache the exact task text from inside the task container.  run() will
-        # require Harbor's instruction argument to match it before rendering the
-        # official autoresearch template.
+        # Cache the exact task text from inside the task container. Depending
+        # on the Harbor task image, the mounted task instruction is named
+        # TASK.md or instruction.md.
+        task_path_result = await environment.exec(
+            "if test -f /app/TASK.md; then printf /app/TASK.md; "
+            "elif test -f /app/instruction.md; then printf /app/instruction.md; "
+            "else exit 2; fi",
+            cwd="/app", env=self._runtime_env(), timeout_sec=30,
+        )
+        if task_path_result.return_code != 0:
+            raise RuntimeError("task image has neither /app/TASK.md nor /app/instruction.md")
+        self._task_instruction_path = (task_path_result.stdout or "").strip()
         task_read = await environment.exec(
-            "cat /app/TASK.md",
+            "cat " + shlex.quote(self._task_instruction_path),
             cwd="/app",
             env=self._runtime_env(),
             timeout_sec=60,
         )
         self._write_optional_log("task-read.stderr.log", task_read.stderr)
         if task_read.return_code != 0:
-            raise RuntimeError("failed to read /app/TASK.md during setup")
+            raise RuntimeError(f"failed to read {self._task_instruction_path} during setup")
         self._task_instruction_on_disk = task_read.stdout or ""
+        path_hash = await environment.exec(
+            "sha256sum " + shlex.quote(self._task_instruction_path),
+            cwd="/app", env=self._runtime_env(), timeout_sec=30,
+        )
+        self._write_optional_log("task-instruction-path.txt", self._task_instruction_path + "\n" + (path_hash.stdout or ""))
 
         # Initialize an immutable v0 baseline snapshot and helper-managed
         # experiment log before the model starts.  This does not run a visible

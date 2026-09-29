@@ -1,0 +1,3 @@
+- insert:
+    - id: bbo-split-guard
+      name: '/opt/dsh-config/bbo-split-guard.mjs'
