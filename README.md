@@ -51,45 +51,7 @@ Dynamic-Cordis:
 ./formal-run.sh dynamic-cordis
 ```
 
-## 2. Scheme B — Reviewer Collaboration
-
-Scheme B separates **implementation** from **post-evaluation review**.
-
-Primary A writes the complete solver and proposes one research mechanism at a time. After the candidate is evaluated, Reviewer B receives the candidate, diff, score, and recent experiment history. B analyzes the evidence and writes a review that guides A's next iteration.
-
-The reviewer does not edit the solver and does not choose the final version.
-
-```text
-parent
-  ↓
-Primary A: hypothesis + full solver
-  ↓
-selfcheck
-  ↓
-Reviewer B: evidence-based review
-  ↓
-next Primary A iteration
-```
-
-### Run
-
-No-Cordis:
-
-```bash
-COLLAB_TOTAL_SEC=43200 \
-./collab-run.sh <run-id> no-cordis
-```
-
-Dynamic-Cordis:
-
-```bash
-COLLAB_TOTAL_SEC=43200 \
-./collab-run.sh <run-id> dynamic-cordis
-```
-
-For shorter experiments, change `COLLAB_TOTAL_SEC`, for example `3600` for one hour.
-
-## 3. Scheme A — Split Collaboration
+## 2. Scheme A — Split Collaboration
 
 Scheme A lets two models write different parts of the optimizer in parallel.
 
@@ -135,3 +97,43 @@ COLLAB_MIN_NEW_ROUND_SEC=600 \
 ```
 
 For shorter experiments, change `COLLAB_TOTAL_SEC`, for example `3600` for one hour.
+
+
+## 3. Scheme B — Reviewer Collaboration
+
+Scheme B separates **implementation** from **post-evaluation review**.
+
+Primary A writes the complete solver and proposes one research mechanism at a time. After the candidate is evaluated, Reviewer B receives the candidate, diff, score, and recent experiment history. B analyzes the evidence and writes a review that guides A's next iteration.
+
+The reviewer does not edit the solver and does not choose the final version.
+
+```text
+parent
+  ↓
+Primary A: hypothesis + full solver
+  ↓
+selfcheck
+  ↓
+Reviewer B: evidence-based review
+  ↓
+next Primary A iteration
+```
+
+### Run
+
+No-Cordis:
+
+```bash
+COLLAB_TOTAL_SEC=43200 \
+./collab-run.sh <run-id> no-cordis
+```
+
+Dynamic-Cordis:
+
+```bash
+COLLAB_TOTAL_SEC=43200 \
+./collab-run.sh <run-id> dynamic-cordis
+```
+
+For shorter experiments, change `COLLAB_TOTAL_SEC`, for example `3600` for one hour.
+
