@@ -1,0 +1,9 @@
+{
+  "source_pool": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/work/EvoMAS-bbo/pool/paper_bbeh_s1",
+  "source_configs": [
+    "debate.yaml",
+    "majority_vote.yaml",
+    "peer_review.yaml"
+  ],
+  "adaptation": "Only agent model_id changed to openai:deepseek-v4-flash-s2"
+}
