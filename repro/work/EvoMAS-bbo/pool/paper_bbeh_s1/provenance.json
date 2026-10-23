@@ -1,0 +1,14 @@
+{
+  "source": "repro/upstream/EvoMAS/mas_pools/bbeh",
+  "upstream_commit": "93fd9d6766b093f6bbdeeffc35896910cbece6e2",
+  "source_configs": [
+    "peer_review",
+    "majority_vote",
+    "debate"
+  ],
+  "adaptation": {
+    "model_id_for_all_agents": "openai:deepseek-v4-flash-s1",
+    "tools": "preserved as empty",
+    "topology_and_roles": "preserved from source YAML"
+  }
+}

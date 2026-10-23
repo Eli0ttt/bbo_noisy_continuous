@@ -1,0 +1,19 @@
+{
+  "note": "Extracted from the completed 2026-10-22 pilot. Best-so-far means highest official score among the four recorded evaluations; latest means the final EvoMAS evaluation. These serve different purposes.",
+  "best_solver.py": {
+    "candidate_sha256": "72c9dfb2f499ef2fa29631ec6a15c1847c5ae89ac5e4b20dd753177101997e18",
+    "official_score": 0.1472174214336678,
+    "score_anytime": 0.10099312813750332,
+    "score_final": 0.255074105791385,
+    "source_config": "repro/work/EvoMAS-bbo/outputs/upstream_main_bbo_live_pilot_majority_s2_003_fix/working_pool/majority_vote.yaml",
+    "source_evaluation_index": 2
+  },
+  "latest_solver.py": {
+    "candidate_sha256": "a0ca9ce86b9ef84cbca4f7a1dd89c59a164cf76158c146f694ef655eb8410eab",
+    "official_score": 0.11945137482330859,
+    "score_anytime": 0.08612975302151449,
+    "score_final": 0.19720182569416156,
+    "source_config": "/tmp/evomas_5kercg78/evomas.yaml",
+    "source_evaluation_index": 3
+  }
+}

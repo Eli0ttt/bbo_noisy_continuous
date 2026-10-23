@@ -1,0 +1,13 @@
+{
+    "job_name": "2026-10-23__02-44-19",
+    "agents": [
+        {
+            "name": "nop"
+        }
+    ],
+    "tasks": [
+        {
+            "path": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/work/rsi_exam_hidden_replay.fWbux1Ep/bbo_noisy_continuous"
+        }
+    ]
+}

@@ -1,0 +1,1 @@
+{"budget": 120, "direction": "higher", "mean_final_latent_objective": 32.42530796187185, "metric": "oracle_normalized_auc70_final30", "n_instances": 12, "n_seeds": 20, "score": 0.23712222639814703, "score_anytime": 0.19309423890201036, "score_final": 0.33985419722246585}

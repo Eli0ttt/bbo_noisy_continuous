@@ -43,3 +43,9 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+# Local experiment outputs and generated files
+repro/work/EvoMAS-bbo/outputs/
+__pycache__/
+*.py[cod]
+.env
+*.env
