@@ -1,8 +1,0 @@
-{
-  "accepted_to_pool": false,
-  "added_path": null,
-  "base_score": 0.23712222639814703,
-  "mutated_score": 0.23712222639814703,
-  "score_delta": 0.0,
-  "trace_path": "repro/work/EvoMAS-bbo/memory/evolution_trace_step_002.txt"
-}

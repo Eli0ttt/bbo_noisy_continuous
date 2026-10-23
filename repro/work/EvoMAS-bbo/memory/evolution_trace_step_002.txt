@@ -1,7 +1,0 @@
-Evolution Summary for Query: bbo_noisy_continuous...
-
-Performance: 23.71% → 23.71% (Δ +0.00%)
-
-Operations: 1 mutations, 0 crossovers
-
-Note: No improvement achieved in this evolution
