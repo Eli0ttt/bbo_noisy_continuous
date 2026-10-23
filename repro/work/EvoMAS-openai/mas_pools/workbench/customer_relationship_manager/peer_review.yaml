@@ -1,0 +1,297 @@
+name: peer_review_workbench_customer_relationship_manager
+description: "DAG-unrolled peer review (create\u2192review\u2192revise\u2192aggregate) for WorkBench tasks"
+backend: smolagents
+agents:
+  creator1:
+    id: creator1
+    role: creator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_create
+    tools: &id001
+    - workbench_customer_relationship_manager
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  creator2:
+    id: creator2
+    role: creator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_create
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  creator3:
+    id: creator3
+    role: creator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_create
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  creator4:
+    id: creator4
+    role: creator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_create
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  creator5:
+    id: creator5
+    role: creator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_create
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  creator6:
+    id: creator6
+    role: creator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_create
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviewer1:
+    id: reviewer1
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_review
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviewer2:
+    id: reviewer2
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_review
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviewer3:
+    id: reviewer3
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_review
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviewer4:
+    id: reviewer4
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_review
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviewer5:
+    id: reviewer5
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_review
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviewer6:
+    id: reviewer6
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_review
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviser1:
+    id: reviser1
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_revise
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviser2:
+    id: reviser2
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_revise
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviser3:
+    id: reviser3
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_revise
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviser4:
+    id: reviser4
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_revise
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviser5:
+    id: reviser5
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_revise
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  reviser6:
+    id: reviser6
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: reviewer_revise
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  aggregator:
+    id: aggregator
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0
+    prompt: aggregator
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+topology:
+  reports_to:
+    creator1:
+    - reviewer1
+    - reviewer2
+    - reviewer3
+    - reviewer4
+    - reviewer5
+    - reviewer6
+    creator2:
+    - reviewer1
+    - reviewer2
+    - reviewer3
+    - reviewer4
+    - reviewer5
+    - reviewer6
+    creator3:
+    - reviewer1
+    - reviewer2
+    - reviewer3
+    - reviewer4
+    - reviewer5
+    - reviewer6
+    creator4:
+    - reviewer1
+    - reviewer2
+    - reviewer3
+    - reviewer4
+    - reviewer5
+    - reviewer6
+    creator5:
+    - reviewer1
+    - reviewer2
+    - reviewer3
+    - reviewer4
+    - reviewer5
+    - reviewer6
+    creator6:
+    - reviewer1
+    - reviewer2
+    - reviewer3
+    - reviewer4
+    - reviewer5
+    - reviewer6
+    reviewer1:
+    - reviser1
+    - reviser2
+    - reviser3
+    - reviser4
+    - reviser5
+    - reviser6
+    reviewer2:
+    - reviser1
+    - reviser2
+    - reviser3
+    - reviser4
+    - reviser5
+    - reviser6
+    reviewer3:
+    - reviser1
+    - reviser2
+    - reviser3
+    - reviser4
+    - reviser5
+    - reviser6
+    reviewer4:
+    - reviser1
+    - reviser2
+    - reviser3
+    - reviser4
+    - reviser5
+    - reviser6
+    reviewer5:
+    - reviser1
+    - reviser2
+    - reviser3
+    - reviser4
+    - reviser5
+    - reviser6
+    reviewer6:
+    - reviser1
+    - reviser2
+    - reviser3
+    - reviser4
+    - reviser5
+    - reviser6
+    reviser1:
+    - aggregator
+    reviser2:
+    - aggregator
+    reviser3:
+    - aggregator
+    reviser4:
+    - aggregator
+    reviser5:
+    - aggregator
+    reviser6:
+    - aggregator
+execution:
+  parallel_workers: true
+  timeout: 900
+  max_retries: 0

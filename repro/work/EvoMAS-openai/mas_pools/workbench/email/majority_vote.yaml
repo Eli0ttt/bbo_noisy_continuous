@@ -1,0 +1,99 @@
+name: majority_vote_workbench_email
+description: Majority voting system with 6 CodeAgents for WorkBench tasks
+backend: smolagents
+agents:
+  worker1:
+    id: worker1
+    role: worker
+    agent_type: CodeAgent
+    model_id: bedrock:qwen.qwen3-235b-a22b-2507-v1:0
+    prompt: worker
+    tools:
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  worker2:
+    id: worker2
+    role: worker
+    agent_type: CodeAgent
+    model_id: bedrock:qwen.qwen3-235b-a22b-2507-v1:0
+    prompt: worker
+    tools:
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  worker3:
+    id: worker3
+    role: worker
+    agent_type: CodeAgent
+    model_id: bedrock:qwen.qwen3-235b-a22b-2507-v1:0
+    prompt: worker
+    tools:
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  worker4:
+    id: worker4
+    role: worker
+    agent_type: CodeAgent
+    model_id: bedrock:qwen.qwen3-235b-a22b-2507-v1:0
+    prompt: worker
+    tools:
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  worker5:
+    id: worker5
+    role: worker
+    agent_type: CodeAgent
+    model_id: bedrock:qwen.qwen3-235b-a22b-2507-v1:0
+    prompt: worker
+    tools:
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  worker6:
+    id: worker6
+    role: worker
+    agent_type: CodeAgent
+    model_id: bedrock:qwen.qwen3-235b-a22b-2507-v1:0
+    prompt: worker
+    tools:
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  aggregator:
+    id: aggregator
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0
+    prompt: aggregator
+    tools:
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+topology:
+  reports_to:
+    worker1:
+    - aggregator
+    worker2:
+    - aggregator
+    worker3:
+    - aggregator
+    worker4:
+    - aggregator
+    worker5:
+    - aggregator
+    worker6:
+    - aggregator
+execution:
+  parallel_workers: true
+  timeout: 900
+  max_retries: 0

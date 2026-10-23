@@ -1,0 +1,21 @@
+name: single_codeagent_workbench_multi_domain
+description: Single CodeAgent for WorkBench multi_domain tasks
+backend: smolagents
+agents:
+  worker:
+    id: worker
+    role: worker
+    agent_type: CodeAgent
+    model_id: bedrock:qwen.qwen3-235b-a22b-2507-v1:0
+    prompt: worker
+    tools:
+    - workbench_multi_domain
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+topology:
+  reports_to: {}
+execution:
+  parallel_workers: false
+  timeout: 900
+  max_retries: 0

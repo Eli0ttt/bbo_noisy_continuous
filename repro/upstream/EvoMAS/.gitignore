@@ -1,0 +1,36 @@
+# directories
+__pycache__/
+__deprecated__/
+plotting/
+preprocessing/
+processing/
+agent_mas/
+dataset/repos/
+temp_configs/
+output/
+output_*/
+rebuttal/
+test/
+figs/
+experiments/
+scripts_test/
+*_old/
+logs/
+
+# files
+test*.py
+*.pyc
+.DS_Store
+.env
+*_task.py
+sync.sh
+logs.txt
+*.log
+run_*.py
+
+# keys
+swarm/.env
+
+# backup files
+data_backup/
+output_backup/
