@@ -324,6 +324,14 @@ class SmolagentsRunner(BaseAgentRunner):
                             "Loaded PythonInterpreterTool for agent %s",
                             spec.id,
                         )
+                    elif tool_spec in {"bbo_read_context", "bbo_write_candidate", "bbo_preflight_candidate"}:
+                        from src.tools.bbo_generation import make_tool
+                        from pathlib import Path
+                        root = getattr(self, "bbo_tool_root", None)
+                        if root is None:
+                            raise RuntimeError("BBO tool requested outside BBO research runtime")
+                        tools_to_use.append(make_tool(tool_spec, Path(root), spec.id))
+                        logger.info("Loaded BBO tool %s for agent %s", tool_spec, spec.id)
                     else:
                         raise ValueError(
                             f"Unsupported tool {tool_spec!r} "

@@ -84,16 +84,7 @@ Example (topology):
 
 ## BBO Adapter Compatibility Constraint
 
-The current BBO adapter does not expose external tools to agents.
-Therefore, keep every agent's `tools` list exactly unchanged.
-Do not add, remove, or modify tools.
-
-For this adapter, mutation may change only one of:
-- prompts
-- model_id
-- topology
-
-All model IDs must remain within the available model list.
+Follow the BBO tool catalog and model allow-list below. Change only one component type per mutation, as specified above.
 
 {{model_constraint}}
 

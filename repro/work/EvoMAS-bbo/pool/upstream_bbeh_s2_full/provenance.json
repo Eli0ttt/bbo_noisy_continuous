@@ -1,0 +1,36 @@
+{
+  "configs": {
+    "croto.yaml": {
+      "adapted_sha256": "303681e23adcaf41ebb914112a7c312cd680adf5b3f2138c012e53f220249576",
+      "agent_count": 14,
+      "upstream_sha256": "6c6344d6f1bea32fde4be0e205aac120ad727ded0e0161a626edfa3bbc56083a"
+    },
+    "debate.yaml": {
+      "adapted_sha256": "1b9ea23b7fdd1a3fec7bcbdb84aaada3fa8405389c0e9835163f02cd9f8d371f",
+      "agent_count": 19,
+      "upstream_sha256": "6d588373e17b242dc7ce968008fce3a763fcd1fd0beaa3e82449e1096c7c2b4c"
+    },
+    "majority_vote.yaml": {
+      "adapted_sha256": "0485c2cc23d72d56b31e078c8fa17e8a8de03b82c02232440ac25c53817a8d00",
+      "agent_count": 7,
+      "upstream_sha256": "6addefa32a5adf7d61812170d875f13aa7904ab04ae11fd31e75e54358d918ca"
+    },
+    "peer_review.yaml": {
+      "adapted_sha256": "8c40a72de3ca1a42967cbea29707837caaf4f82ede0a5ad08a70f164eeafe313",
+      "agent_count": 19,
+      "upstream_sha256": "98479becdc3976aaf2f95d1af3a011eff031a09c5f9e57f67400033f93025f4a"
+    },
+    "single_codeagent.yaml": {
+      "adapted_sha256": "029c2860803e7046fa387e7ad1320faa0283613a9b03f82cef2002ef1ed95863",
+      "agent_count": 1,
+      "upstream_sha256": "0b5728c52f881e68d186f998f2b841b156bb233be1d6e022a9cec406fc54face"
+    },
+    "smoa.yaml": {
+      "adapted_sha256": "86293612102e67d87461c3e69b2cbb3419b36daca0a246c82c826d77f903c0f7",
+      "agent_count": 11,
+      "upstream_sha256": "8326083c34ae1dc92c7e657ab5e965377ca3aade71c659bba477832222f5acef"
+    }
+  },
+  "model": "openai:deepseek-v4-flash-s2",
+  "source": "repro/upstream/EvoMAS/mas_pools/bbeh"
+}

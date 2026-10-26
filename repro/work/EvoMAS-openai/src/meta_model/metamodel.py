@@ -385,6 +385,8 @@ execution:
         else:
             model_constraint = ""
 
+        model_constraint += "\n\n" + getattr(self, "bbo_tool_policy", "")
+
         # Prepare prompt variables
         prompt_vars = {
             "mas_config": mas_config,
@@ -469,6 +471,8 @@ execution:
             model_constraint = f"\n\n**Available Models for MAS Agents:**\nYou can ONLY use the following models for agent model_id fields:\n{model_list_str}\n"
         else:
             model_constraint = ""
+
+        model_constraint += "\n\n" + getattr(self, "bbo_tool_policy", "")
 
         # Prepare prompt variables
         prompt_vars = {
@@ -568,6 +572,8 @@ execution:
             model_constraint = f"\n\n**Available Models for MAS Agents:**\nYou can ONLY use the following models for agent model_id fields:\n{model_list_str}\n"
         else:
             model_constraint = ""
+
+        model_constraint += "\n\n" + getattr(self, "bbo_tool_policy", "")
 
         # Prepare prompt variables
         prompt_vars = {

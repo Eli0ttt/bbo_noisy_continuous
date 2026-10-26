@@ -24,12 +24,12 @@ ROLE_TASKS = {
     'worker': 'As an EvoMAS worker, independently produce complete BBO solver.py source. Implement Optimizer(dim, lower, upper, budget, seed, rng), ask(n), tell(X, y, metadata=None). Use only stdlib and NumPy; ensure finite in-bounds queries within budget. Avoid Python max/min or truth tests on NumPy vectors.',
     'debater_initial': 'As an EvoMAS initial debater, propose a complete noise-aware BBO optimizer. Implement the required Optimizer constructor, ask(n), and tell(X, y, metadata=None) using only stdlib and NumPy. Avoid Python max/min or truth tests on NumPy vectors.',
     'debater_round': 'As an EvoMAS debate participant, analyze prior optimizer proposals and give specific improvements while preserving the BBO ask/tell contract. Avoid Python max/min or truth tests on NumPy vectors; do not access the objective oracle.',
-    "aggregator": "Use the preceding agents' reports. Return exactly one complete, self-contained solver.py in one fenced Python block; repair any invalid interface. Before returning, check that ask(n) returns a finite in-bounds array of shape (n, dim), tell(X, y, metadata=None) accepts the evaluator's 3-argument call, and no NumPy vector is used as a Python scalar condition or passed to built-in max/min. Use NumPy elementwise operations for vector steps and scalarize any global step size. Do not execute it or call the evaluator.",
+    "aggregator": "Use the preceding agents' reports. Return exactly one complete, self-contained solver.py in one fenced Python block; repair any invalid interface. Before returning, inspect ask(1), ask(31), and ask(120) for finite in-bounds arrays of shape (n, dim); when filling one coordinate points[:, d], use lower[d] and upper[d], never full bound vectors; ensure tell(X, y, metadata=None) accepts the evaluator's 3-argument call, and no NumPy vector is used as a Python scalar condition or passed to built-in max/min. Use NumPy elementwise operations for vector steps and scalarize any global step size. Do not execute it or call the evaluator.",
+    "team_worker": "Work with your team on a concrete BBO optimizer design and implementation. Return a complete self-contained solver.py proposal using only the standard library and NumPy; do not call the objective or evaluator.",
+    "processor": "Synthesize upstream BBO solver proposals into a concrete improvement. Include the algorithm, ask/tell interface checks, and, when useful, complete solver.py code. Do not call the objective or evaluator.",
+    "judge": "Compare upstream BBO solver proposals for validity, noise awareness, bounds, query use, and likely anytime performance. Report actionable findings without accessing the objective or evaluator.",
 }
 ALLOWED_MODELS = {"openai:deepseek-v4-flash-s2"}
-ALLOWED_TOOLS = {"python_interpreter", "python_code_interpreter"}
-
-
 def agent_instruction(agent) -> str:
     """Keep evolved prompt variants subordinate to BBO's required role contract."""
     role_defaults = {
@@ -39,6 +39,9 @@ def agent_instruction(agent) -> str:
         "reviser": ROLE_TASKS["reviewer_revise"],
         "debater": ROLE_TASKS.get(agent.prompt, ROLE_TASKS["debater_round"]),
         "aggregator": ROLE_TASKS["aggregator"],
+        "team_worker": ROLE_TASKS["team_worker"],
+        "processor": ROLE_TASKS["processor"],
+        "judge": ROLE_TASKS["judge"],
     }
     canonical = ROLE_TASKS.get(agent.prompt)
     if canonical is None:
@@ -107,7 +110,11 @@ def extract_candidate(content: str) -> str:
         return candidate
     raise ValueError("No top-level Optimizer candidate or unambiguous solver_code string in final report")
 
-def validate(spec) -> list[list[str]]:
+def validate(spec, tool_mode="none") -> list[list[str]]:
+    if tool_mode not in {"none", "bbo"}:
+        raise ValueError("unknown BBO tool mode")
+    from src.tools.bbo_generation import CATALOG
+    permitted_tools = set() if tool_mode == "none" else set(CATALOG)
     agents = spec.agents
     if spec.backend != "smolagents":
         raise ValueError("BBO adapter requires the native smolagents backend")
@@ -129,7 +136,7 @@ def validate(spec) -> list[list[str]]:
             raise ValueError(f"Unapproved model for {aid}: {agent.model_id}")
         if not isinstance(agent.prompt, str) or not agent.prompt.strip():
             raise ValueError(f"Empty or invalid EvoMAS prompt for {aid}")
-        if set(agent.tools) - ALLOWED_TOOLS:
+        if set(agent.tools) - permitted_tools:
             raise ValueError(f"Unsupported tools for {aid}: {agent.tools}")
 
     terminal = levels[-1]
@@ -142,7 +149,8 @@ def validate(spec) -> list[list[str]]:
         raise ValueError("BBO candidate requires an aggregator or one upstream worker")
     return levels
 
-def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run: bool):
+def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run: bool,
+            tool_mode: str = "none", feedback: dict | None = None):
     root = Path(__file__).resolve().parents[2] / "EvoMAS-openai"
     sys.path.insert(0, str(root))
     from src.agents.spec import AgentResult
@@ -150,13 +158,27 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
     import src.mas.runtime as runtime_module
 
     spec = MasSpec(**yaml.safe_load(config_path.read_text(encoding="utf-8")))
-    levels = validate(spec)
+    levels = validate(spec, tool_mode)
     terminal_agent = levels[-1][0]
     output_dir.mkdir(parents=True, exist_ok=True)
     instruction = instruction_path.read_text(encoding="utf-8")
+    if tool_mode == "bbo":
+        work = output_dir / "tool_workspace"
+        work.mkdir(exist_ok=True)
+        (work / "instruction.md").write_text(instruction, encoding="utf-8")
     task = ("RSI-Exam BBO optimizer generation. The goal is to MINIMIZE noisy y. "
-            "No objective oracle is available to agents. Candidate code must obey:\n\n"
-            + instruction)
+            "No objective oracle is available to agents. Count actual evaluations "
+            "exactly once across ask/tell: increment the counter in tell or ask, "
+            "never both. In ask(1), each branch must keep every allocation nonnegative; "
+            "always cap n_explore <= n_actual before n_exploit = n_actual - n_explore. "
+            "Use local preflight on the final candidate when the assigned tools permit it. "
+            "Candidate code must obey:\n\n" + instruction)
+    if feedback:
+        if hashlib.sha256(feedback["solver_source"].encode()).hexdigest() != feedback["source_sha256"]:
+            raise ValueError("research feedback source hash mismatch")
+        (output_dir / "research_feedback.json").write_text(
+            json.dumps(feedback, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        task += "\n\n## Prior research feedback (public visible data only)\n" + feedback["summary"]
     failures = []
     calls = []
 
@@ -182,10 +204,17 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
     class RoleRunner:
         def __init__(self):
             self.delegate = UnderlyingRunner()
+            if not dry_run and tool_mode == "bbo":
+                self.delegate.bbo_tool_root = output_dir
 
         def run(self, agent, text, context=None):
+            prior = ("\n\n## Prior best solver.py source for direct repair\n```python\n"
+                     + feedback["solver_source"] + "\n```\n"
+                     "Repair the diagnosed defects in this source and propose a complete "
+                     "new solver.py; do not merely describe a patch.\n"
+                     if feedback and agent.id == terminal_agent else "")
             result = self.delegate.run(
-                agent, agent_instruction(agent) + "\n\n" + text, context
+                agent, agent_instruction(agent) + "\n\n" + text + prior, context
             )
             (output_dir / f"agent_{agent.id}.json").write_text(
                 json.dumps({
@@ -215,12 +244,36 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
     (output_dir / "aggregator_response.txt").write_text(final, encoding="utf-8")
     if failures or final.startswith("Error:"):
         raise RuntimeError(f"Agent failed; errors={failures}, final={final[:200]}")
-    candidate = extract_candidate(final)
+    try:
+        candidate = extract_candidate(final)
+        candidate_source = "final_report"
+    except ValueError:
+        # A CodeAgent may use the YAML-loaded writer and finish with a path-only
+        # message. Accept only its own audited file, never another agent's file.
+        if tool_mode != "bbo" or not re.search(r"(?:candidate\.py|solver\.py)", final):
+            raise
+        owned = output_dir / "tool_workspace" / terminal_agent / "candidate.py"
+        audit_file = output_dir / "tool_audit.jsonl"
+        if owned.is_symlink() or not owned.is_file() or not audit_file.is_file():
+            raise
+        writes = [json.loads(row) for row in audit_file.read_text().splitlines()
+                  if row.strip()]
+        if not any(row.get("agent") == terminal_agent and
+                   row.get("tool") == "bbo_write_candidate" and
+                   row.get("event") == "called" and row.get("success") is True
+                   for row in writes):
+            raise
+        candidate = extract_candidate(owned.read_text(encoding="utf-8"))
+        candidate_source = "terminal_agent_tool_file"
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / ("mock_candidate.py" if dry_run else "candidate_solver.py")).write_text(candidate)
-    summary = {"dry_run": dry_run, "levels": levels,
+    summary = {"dry_run": dry_run, "tool_mode": tool_mode, "levels": levels,
+               "research_feedback_source": feedback["source_label"] if feedback else None,
+               "research_feedback_sha256": feedback["source_sha256"] if feedback else None,
+               "configured_tools": {aid: list(a.tools) for aid, a in spec.agents.items()},
                "models": {aid: a.model_id for aid, a in spec.agents.items()},
                "candidate_sha256": hashlib.sha256(candidate.encode()).hexdigest(),
+               "candidate_source": candidate_source,
                "metadata": metadata, "calls": calls}
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary))
