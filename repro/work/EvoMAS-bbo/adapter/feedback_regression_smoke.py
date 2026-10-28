@@ -21,11 +21,13 @@ except ImportError:
     sys.modules["smolagents"] = types.SimpleNamespace(Tool=type("Tool", (), {}))
 
 from visible_selfcheck import CONTRACT_PROBE, CandidateSelfcheckError, evaluate_solver
-from evomas_bbo_pipeline import (build_research_feedback, load_prior_run,
+from evomas_bbo_pipeline import (build_research_feedback, load_prior_memory,
                                  copy_initial_memory, should_restore_basic_tools,
+                                 normalize_basic_pool_seeds,
                                  evaluate_config, validated_config,
-                                 stage_prior_incumbent, select_best_visible)
-from native_bbo_runtime import CandidateExtractionError, extract_candidate
+                                 sanitize_working_pool, select_best_visible)
+from native_bbo_runtime import (CandidateExtractionError, agent_instruction,
+                                extract_candidate, find_project_root)
 spec = importlib.util.spec_from_file_location("bbo_generation", UPSTREAM)
 tools = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tools)
@@ -72,13 +74,20 @@ def probe(source, folder):
 
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
+    from types import SimpleNamespace
+    judge = SimpleNamespace(role="judge", prompt="judge", tools=["bbo_read_context"])
+    instruction = agent_instruction(judge)
+    assert "Assigned callable BBO tools for THIS agent: bbo_read_context" in instruction
+    assert "bbo_write_candidate(source=" not in instruction
+    assert find_project_root() == Path(__file__).resolve().parents[4]
     seed_pool = ADAPTER.parent / "pool" / "upstream_bbeh_s2_full_basic"
     if seed_pool.is_dir():
         import yaml
         for seed in seed_pool.glob("*.yaml"):
             config = yaml.safe_load(seed.read_text(encoding="utf-8"))
-            assert all(agent.get("tools") for agent in config["agents"].values()), seed
-            assert any("bbo_write_candidate" in agent["tools"]
+            expected = ["bbo_read_context", "bbo_write_candidate",
+                        "bbo_preflight_candidate", "bbo_probe_candidate"]
+            assert all(agent.get("tools") == expected
                        for agent in config["agents"].values()), seed
     assert extract_candidate("```python\n" + GOOD + "\n```") == GOOD.strip() + "\n"
     for malformed in ("I will write code later", "```python\nprint('hi')\n```"):
@@ -89,6 +98,24 @@ with tempfile.TemporaryDirectory() as temporary:
         else:
             raise AssertionError("missing Optimizer was accepted")
     assert tools.inspect_candidate(GOOD).startswith("PASS")
+    tool_root = root / "agent_probe"
+    tool_root.mkdir()
+    writer = tools.make_tool("bbo_write_candidate", tool_root, "worker")
+    checker = tools.make_tool("bbo_probe_candidate", tool_root, "worker", "offline-visible")
+    (tool_root / "tool_workspace" / "worker" / "candidate.py").write_text(GOOD)
+    assert checker.forward("candidate.py").startswith("DENIED: write your candidate")
+    assert writer.forward(GOOD).startswith("WROTE")
+    def fake_probe_docker(command, **kwargs):
+        if "python" in command:
+            payload = {"valid": True, "cases": [{"observed": 120, "unique": 120}],
+                       "warnings": []}
+            return subprocess.CompletedProcess(command, 0,
+                "CONTRACT_PASS\nPROBE_JSON:" + json.dumps(payload) + "\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+    with patch("subprocess.run", side_effect=fake_probe_docker) as mocked_probe:
+        assert "unique proposed points" in checker.forward("candidate.py")
+        assert any("docker" == call.args[0][0] and "python" in call.args[0]
+                   for call in mocked_probe.call_args_list)
     code, outcome = probe(GOOD, root)
     assert code == 0 and outcome["valid"] and not outcome["warnings"]
 
@@ -123,27 +150,20 @@ with tempfile.TemporaryDirectory() as temporary:
     (root / "memory.json").write_text("[]")
     (root / "summary.json").write_text(json.dumps({
         "best_visible": records[0], "candidates": records}))
-    carried, memory = load_prior_run(root)
-    assert carried["source_sha256"] == records[0]["sha256"]
-    assert memory == root / "memory.json"
-    (candidate / "evomas_metrics.json").write_text(json.dumps({
-        "bbo_score": 0.1, "contract_valid": True, "accuracy": 10.0,
-        "score_anytime": 0.07, "score_final": 0.17,
-        "mean_final_latent_objective": 40.0}))
+    assert load_prior_memory(root) == root / "memory.json"
     next_run = root / "next_run"
     next_run.mkdir()
     next_eval = next_run / "evaluations"
     next_eval.mkdir()
-    incumbent = stage_prior_incumbent(root, next_run, next_eval)
     lower = {"label": "new_child", "contract_valid": True, "visible_score": 0.02,
              "candidate_path": str(candidate / "candidate_solver.py"),
              "sha256": records[0]["sha256"]}
-    assert select_best_visible([lower], 1, next_run, False, incumbent)["label"] == "continuation_incumbent"
-    (next_run / "summary.json").write_text(json.dumps({
-        "best_visible": incumbent, "incumbent_provenance": incumbent,
-        "candidates": [lower]}))
-    reused, _ = load_prior_run(next_run)
-    assert reused["source_sha256"] == records[0]["sha256"]
+    higher = dict(lower, label="new_parent", visible_score=0.03)
+    assert select_best_visible([lower, higher], 2, next_run, False)["label"] == "new_parent"
+    # An earlier solver is never carried even when its visible score is higher.
+    assert (next_run / "best_visible_solver.py").read_text() == GOOD
+    (root / "best_visible_solver.py").write_text("tampered old solver")
+    assert load_prior_memory(root) == root / "memory.json"
     (root / "memory.json").write_text(json.dumps([{
         "query": "BBO", "action": "mutation", "config_changes": "prompt",
         "old_accuracy": 23.79, "new_accuracy": 15.48, "success": False,
@@ -155,6 +175,16 @@ with tempfile.TemporaryDirectory() as temporary:
     originals = {"croto.yaml", "smoa.yaml"}
     assert should_restore_basic_tools("basic", originals, root / "croto.yaml")
     assert not should_restore_basic_tools("basic", originals, root / "evolved_01.yaml")
+    copied = root / "copied"
+    copied.mkdir()
+    (copied / "croto.yaml").write_text((seed_pool / "croto.yaml").read_text())
+    evolved_text = (seed_pool / "croto.yaml").read_text().replace(
+        "- bbo_write_candidate\n", "", 1)
+    (copied / "evolved_01.yaml").write_text(evolved_text)
+    normalize_basic_pool_seeds(copied, "basic", originals)
+    assert all(a["tools"] == expected for a in yaml.safe_load(
+        (copied / "croto.yaml").read_text())["agents"].values())
+    assert (copied / "evolved_01.yaml").read_text() == evolved_text
     with patch("evomas_bbo_pipeline.execute_mas", side_effect=CandidateExtractionError("missing code")):
         failed = evaluate_config("agents: {}\n", "invalid", root, root / "instruction.md",
                                  "unused", False, "bbo")
@@ -162,13 +192,20 @@ with tempfile.TemporaryDirectory() as temporary:
     assert failed["accuracy"] < 0
     assert (root / "invalid" / "aggregator_response.txt").exists() is False
     assert "missing code" in (root / "invalid" / "selfcheck.json").read_text()
-    (root / "best_visible_solver.py").write_text(GOOD + "# tampered\n")
-    try:
-        load_prior_run(root)
-    except ValueError as exc:
-        assert "hash mismatch" in str(exc)
-    else:
-        raise AssertionError("tampered incumbent must be rejected")
+    sys.path.insert(0, str(ADAPTER.parent.parent / "EvoMAS-openai"))
+    pool = root / "pool"
+    pool.mkdir()
+    good_seed = (seed_pool / "majority_vote.yaml").read_text(encoding="utf-8")
+    (pool / "valid.yaml").write_text(good_seed)
+    (pool / "invalid.yaml").write_text("agents: {}\n")
+    (pool / "mas_index.json").write_text(json.dumps({
+        "valid": {"path": "/stale/valid.yaml"},
+        "invalid": {"path": "/stale/invalid.yaml"}}))
+    rejected = sanitize_working_pool(pool, "bbo")
+    assert len(rejected) == 1 and rejected[0]["name"] == "invalid.yaml"
+    assert (root / "rejected_pool_configs" / "invalid.yaml").is_file()
+    index = json.loads((pool / "mas_index.json").read_text())
+    assert list(index) == ["valid"] and index["valid"]["path"] == str(pool / "valid.yaml")
 
     # Check orchestration: synthetic probe is not substituted for official selfcheck.
     calls = []

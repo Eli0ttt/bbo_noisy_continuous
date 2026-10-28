@@ -11,6 +11,9 @@ agents:
     prompt: reviewer_create
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -22,6 +25,9 @@ agents:
     prompt: reviewer_create
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -33,6 +39,9 @@ agents:
     prompt: reviewer_create
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -44,6 +53,9 @@ agents:
     prompt: reviewer_create
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -55,6 +67,9 @@ agents:
     prompt: reviewer_create
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -66,6 +81,9 @@ agents:
     prompt: reviewer_create
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -77,6 +95,9 @@ agents:
     prompt: reviewer_review
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -88,6 +109,9 @@ agents:
     prompt: reviewer_review
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -99,6 +123,9 @@ agents:
     prompt: reviewer_review
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -110,6 +137,9 @@ agents:
     prompt: reviewer_review
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -121,6 +151,9 @@ agents:
     prompt: reviewer_review
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -132,6 +165,9 @@ agents:
     prompt: reviewer_review
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -143,6 +179,9 @@ agents:
     prompt: reviewer_revise
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -154,6 +193,9 @@ agents:
     prompt: reviewer_revise
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -165,6 +207,9 @@ agents:
     prompt: reviewer_revise
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -176,6 +221,9 @@ agents:
     prompt: reviewer_revise
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -187,6 +235,9 @@ agents:
     prompt: reviewer_revise
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -198,6 +249,9 @@ agents:
     prompt: reviewer_revise
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -211,6 +265,7 @@ agents:
     - bbo_read_context
     - bbo_write_candidate
     - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null

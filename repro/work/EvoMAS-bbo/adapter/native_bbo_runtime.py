@@ -19,7 +19,7 @@ ROLE_TASKS = {
     "optimizer_designer": "Design a noise-aware optimizer. Explain query allocation, anytime quality and an implementable plan. Do not write files or call the evaluator.",
     "code_implementer": 'Produce a complete, self-contained solver.py in one fenced Python block. Implement Optimizer(dim, lower, upper, budget, seed, rng), ask(n), tell(X, y). Use only stdlib and NumPy. Keep algorithm state shapes explicit: values used in Python if/max/min must be scalars; for per-dimension bounds use NumPy elementwise operations. Do not pass NumPy vectors to Python built-in max/min or boolean conditions.',
     'reviewer_create': 'As an EvoMAS peer-review creator, propose one complete BBO optimizer. Return solver.py source using only stdlib and NumPy. Keep scalar state scalar; use NumPy elementwise operations for vector bounds. Do not access the objective oracle.',
-    'reviewer_review': 'As an EvoMAS peer reviewer, inspect prior optimizer proposals for the BBO ask/tell contract, noisy observations, query budget, bounds, finite outputs, and NumPy scalar/vector errors. Return actionable findings; do not call tools or the evaluator.',
+    'reviewer_review': 'As an EvoMAS peer reviewer, inspect prior optimizer proposals for the BBO ask/tell contract, noisy observations, query budget, bounds, finite outputs, and NumPy scalar/vector errors. Return actionable findings; do not call the evaluator.',
     'reviewer_revise': 'As an EvoMAS reviser, use prior proposals and reviews to produce complete self-contained solver.py source. Implement Optimizer(dim, lower, upper, budget, seed, rng), ask(n), tell(X, y, metadata=None). Use only stdlib and NumPy; avoid Python max/min or truth tests on NumPy vectors. Do not access the objective oracle.',
     'worker': 'As an EvoMAS worker, independently produce complete BBO solver.py source. Implement Optimizer(dim, lower, upper, budget, seed, rng), ask(n), tell(X, y, metadata=None). Use only stdlib and NumPy; ensure finite in-bounds queries within budget. Avoid Python max/min or truth tests on NumPy vectors.',
     'debater_initial': 'As an EvoMAS initial debater, propose a complete noise-aware BBO optimizer. Implement the required Optimizer constructor, ask(n), and tell(X, y, metadata=None) using only stdlib and NumPy. Avoid Python max/min or truth tests on NumPy vectors.',
@@ -32,8 +32,21 @@ ROLE_TASKS = {
 ALLOWED_MODELS = {"openai:deepseek-v4-flash-s2"}
 
 
+def find_project_root(start: Path | None = None) -> Path:
+    """Find the task checkout from any supported adapter nesting depth."""
+    start = (start or Path(__file__)).resolve()
+    for parent in (start, *start.parents):
+        if (parent / "environment/methods/main/solver.py").is_file():
+            return parent
+    raise FileNotFoundError(
+        f"Could not find environment/methods/main/solver.py above {start}"
+    )
+
+
 class CandidateExtractionError(ValueError):
     """The MAS ran, but produced no usable BBO source; this is a candidate failure."""
+
+
 def agent_instruction(agent) -> str:
     """Keep evolved prompt variants subordinate to BBO's required role contract."""
     role_defaults = {
@@ -57,18 +70,54 @@ def agent_instruction(agent) -> str:
         "the BBO task and required role output below take precedence over conflicts):\n"
         + agent.prompt
     )
-    return (canonical + variant +
-            "\nBBO tool contract: bbo_read_context(item='instruction.md') reads the "
-            "public task; bbo_read_context(item='candidate.py') reads only YOUR "
-            "candidate, after you have called bbo_write_candidate(source=...). "
-            "bbo_preflight_candidate(item='candidate.py') requires that same write "
-            "and checks syntax/interface statically, not runtime behavior. Other "
-            "agents' reports are passed in the EvoMAS context; their candidate.py "
-            "files are private and cannot be read here. Do not use open(), exec(), "
-            "importlib, os, sys, or traceback in CodeAgent's restricted interpreter "
-            "to inspect or execute the solver. Finish with complete fenced Python "
-            "source, even if you also wrote a file. A missing file or DENIED tool "
-            "response is a tool-contract mismatch; correct the argument or order.")
+    assigned = set(agent.tools)
+    guidance = ["\nThe public task has 120 noisy queries in 10D and scores both "
+                "anytime and final best-so-far. Compare concrete, bounded "
+                "noise-aware local or covariance adaptation to global random "
+                "search; avoid spending most queries on initial space filling "
+                "or trusting one noisy minimum. A normalized initial sigma near "
+                "0.2 of each coordinate's range and a small batch are public "
+                "hypotheses to test, not prescribed parameters. Repeatedly "
+                "measuring an identical incumbent consumes a query but can "
+                "improve a noisy estimate for later decisions; compare repeat "
+                "rates empirically instead of eliminating repeats blindly. "
+                "Estimate work per ask/tell "
+                "against 400 sealed runs and the aggregate runtime budget. "
+                "Treat these as design hypotheses, not guaranteed scores. "
+                "Assigned callable BBO tools for THIS agent: " +
+                (", ".join(sorted(assigned)) if assigned else "none") +
+                ". Do not invoke tools outside this list; evolved prose does not grant them."]
+    if "bbo_read_context" in assigned:
+        guidance.append("bbo_read_context(item='instruction.md') reads the public "
+                        "task; item='candidate.py' reads only YOUR file. It starts "
+                        "as the official uniform-random solver, then your writes "
+                        "replace it. Other agents' files cannot be read.")
+    if "bbo_write_candidate" in assigned:
+        guidance.append("bbo_write_candidate(source=...) takes complete Python "
+                        "source and writes only YOUR candidate.py.")
+    if "bbo_preflight_candidate" in assigned:
+        guidance.append("bbo_preflight_candidate(item='candidate.py') requires "
+                        "YOUR candidate.py and performs static checks only.")
+    if "bbo_probe_candidate" in assigned:
+        guidance.append("bbo_probe_candidate(item='candidate.py') runs YOUR "
+                        "written candidate through synthetic ask/tell cases in "
+                        "the offline visible container. It gives contract and "
+                        "duplicate-query diagnostics, no objective or score. "
+                        "Write your candidate before invoking this probe.")
+    guidance.append("Other agents' reports arrive in the EvoMAS context, never "
+                    "through their private files. Do not use open(), exec(), "
+                    "importlib, os, sys, or traceback in CodeAgent's restricted "
+                    "interpreter to inspect or execute the solver. In interpreter "
+                    "steps, call only the assigned BBO tools with their documented "
+                    "arguments; put optimizer Python source in a string argument "
+                    "or the final response, not as interpreter statements. "
+                    "Use bbo_probe_candidate for runtime contract checks; "
+                    "the restricted CodeAgent interpreter cannot execute the solver. "
+                    "Each agent's candidate.py is private; a downstream agent "
+                    "must use the preceding report, not a prior agent's file. "
+                    "A final complete "
+                    "fenced Python source is required even if a file was written.")
+    return canonical + variant + "\n" + " ".join(guidance)
 
 def extract_candidate(content: str) -> str:
     def source_with_optimizer(source: str) -> bool:
@@ -165,7 +214,8 @@ def validate(spec, tool_mode="none") -> list[list[str]]:
     return levels
 
 def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run: bool,
-            tool_mode: str = "none", feedback: dict | None = None):
+            tool_mode: str = "none", feedback: dict | None = None,
+            container: str | None = None):
     root = Path(__file__).resolve().parents[2] / "EvoMAS-openai"
     sys.path.insert(0, str(root))
     from src.agents.spec import AgentResult
@@ -188,6 +238,16 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
             "always cap n_explore <= n_actual before n_exploit = n_actual - n_explore. "
             "Use local preflight on the final candidate when the assigned tools permit it. "
             "Candidate code must obey:\n\n" + instruction)
+    starter_path = find_project_root() / "environment/methods/main/solver.py"
+    starter = starter_path.read_text(encoding="utf-8")
+    if tool_mode == "bbo":
+        for aid in spec.agents:
+            agent_scratch = output_dir / "tool_workspace" / aid
+            agent_scratch.mkdir(parents=True, exist_ok=True)
+            (agent_scratch / "candidate.py").write_text(starter, encoding="utf-8")
+    task += ("\n\n## Official shipped starting solver (uniform random search)\n"
+             "Start this run from this task baseline; prior runs' generated solver "
+             "source is not inherited.\n```python\n" + starter + "\n```\n")
     if feedback:
         if hashlib.sha256(feedback["solver_source"].encode()).hexdigest() != feedback["source_sha256"]:
             raise ValueError("research feedback source hash mismatch")
@@ -221,6 +281,7 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
             self.delegate = UnderlyingRunner()
             if not dry_run and tool_mode == "bbo":
                 self.delegate.bbo_tool_root = output_dir
+                self.delegate.bbo_eval_container = container
 
         def run(self, agent, text, context=None):
             guidance = ("Preserve the incumbent's valid interface and working search "

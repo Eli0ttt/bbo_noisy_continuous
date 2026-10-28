@@ -54,7 +54,7 @@ class DryRunMetaModel:
 
 
 def restore_basic_seed_tools(config_text: str) -> str:
-    """Freeze initial tool allocation after task adaptation; later operators may evolve it."""
+    """Give every seed agent the same generation tools; EvoMAS may later evolve them."""
     config = yaml.safe_load(config_text)
     agents = config["agents"]
     reports = config["topology"]["reports_to"]
@@ -64,16 +64,27 @@ def restore_basic_seed_tools(config_text: str) -> str:
     terminal = {aid for aid in agents if not reports.get(aid)}
     if len(terminal) != 1:
         raise ValueError("Basic tool seed requires one terminal candidate agent")
-    for aid, agent in agents.items():
-        agent["tools"] = (["bbo_read_context", "bbo_write_candidate",
-                           "bbo_preflight_candidate"] if aid in terminal
-                          else ["bbo_read_context"])
+    initial_tools = ["bbo_read_context", "bbo_write_candidate",
+                     "bbo_preflight_candidate", "bbo_probe_candidate"]
+    for agent in agents.values():
+        agent["tools"] = list(initial_tools)
     return yaml.safe_dump(config, sort_keys=False)
 
 
 def should_restore_basic_tools(seed_policy, original_seed_names, parent_path):
     """Never overwrite tools on an evolved configuration loaded from a prior pool."""
     return seed_policy == "basic" and Path(parent_path).name in original_seed_names
+
+
+def normalize_basic_pool_seeds(working_pool, seed_policy, original_seed_names):
+    """Normalize only copied original seeds before selection and generation."""
+    if seed_policy != "basic":
+        return
+    for name in original_seed_names:
+        path = working_pool / name
+        if path.is_file():
+            path.write_text(restore_basic_seed_tools(path.read_text(encoding="utf-8")),
+                            encoding="utf-8")
 
 
 def metrics_from_bbo(result, runtime_summary, elapsed):
@@ -109,11 +120,15 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
                  if candidate["visible_score"] is not None else "invalid")
         probe = item.get("behavior_probe") or {}
         warnings = "; ".join(probe.get("warnings", []))
+        uniqueness = ", ".join(
+            f"ask({case.get('requests')}): {case.get('unique')}/{case.get('observed')} unique"
+            for case in probe.get("cases", []) if case.get("observed"))
         assessments.append(
             f"{candidate['label']}: visible={score}, valid={candidate.get('contract_valid')}, "
             f"anytime={item['score_anytime']:.6f}, final={item['score_final']:.6f}; "
             f"mean_final_latent={item['mean_final_latent_objective']:.4f}; "
             f"behavior={warnings or probe.get('error', 'no warning')}; "
+            f"query_diversity={uniqueness or 'unknown'}; "
             f"error={item.get('errors', '')[-450:]}"
         )
     agents = []
@@ -141,7 +156,10 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
                    "in the new complete candidate. ")
     summary = ("Prior generated optimizer and PUBLIC visible selfcheck feedback. "
                + instruction + "Seek better anytime and final quality without sealed "
-               "information.\n"
+               "information. Repeated identical points cannot improve the latent "
+               "best-so-far at that query but can improve noisy decisions later; "
+               "evaluate their net value rather than removing them blindly. A static preflight "
+               "does not measure optimizer quality.\n"
                + "\n".join(assessments) + "\nPrior MAS agent trajectory:\n"
                + "\n".join(agents[:24]) + "\nPrior tool calls:\n"
                + "\n".join(tool_events))
@@ -150,67 +168,43 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
             "summary": summary[:9500], "solver_source": source}
 
 
-def load_prior_run(run_dir):
-    """Read only previously generated solvers and public visible feedback."""
+def load_prior_memory(run_dir):
+    """Continue EvoMAS experience only; never read an earlier solver or its score."""
     run_dir = run_dir.resolve()
-    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-    winner = summary["best_visible"]
-    candidates = summary["candidates"]
-    if not winner.get("contract_valid") or winner.get("visible_score") is None:
-        raise ValueError("Previous run has no contract-valid visible winner")
-    labels = [item["label"] for item in candidates]
-    carried = winner["label"] == "continuation_incumbent" and summary.get("incumbent_provenance")
-    if winner["label"] not in labels and not carried:
-        raise ValueError("Previous winner is absent from candidate manifest and incumbent record")
-    archived = run_dir / "best_visible_solver.py"
-    if hashlib.sha256(archived.read_bytes()).hexdigest() != winner["sha256"]:
-        raise ValueError("Previous winner source hash mismatch")
-    evaluations = run_dir / "evaluations"
-    if carried:
-        label = "continuation_incumbent"
-        inherited_dir = evaluations / label
-        if hashlib.sha256((inherited_dir / "candidate_solver.py").read_bytes()).hexdigest() != winner["sha256"]:
-            raise ValueError("Carried incumbent source hash mismatch")
-        metrics = [json.loads((inherited_dir / "evomas_metrics.json").read_text(
-            encoding="utf-8"))]
-        feedback = build_research_feedback(evaluations, [winner], metrics, 0)
-    else:
-        metrics = [json.loads((evaluations / label / "evomas_metrics.json").read_text(
-            encoding="utf-8")) for label in labels]
-        feedback = build_research_feedback(evaluations, candidates, metrics,
-                                           labels.index(winner["label"]))
-    if feedback["source_sha256"] != winner["sha256"]:
-        raise ValueError("Previous candidate differs from the selected solver")
-    memory_path = run_dir / "memory.json"
-    return feedback, memory_path if memory_path.is_file() else None
+    if not (run_dir / "summary.json").is_file():
+        raise FileNotFoundError("Continuation requires a completed run summary")
+    memory = run_dir / "memory.json"
+    return memory if memory.is_file() else None
 
 
-def stage_prior_incumbent(previous_run, output_dir, evaluation_dir):
-    """Carry a previously verified solver without claiming a new MAS evaluation."""
-    previous_run = previous_run.resolve()
-    prior = json.loads((previous_run / "summary.json").read_text(encoding="utf-8"))
-    winner = prior["best_visible"]
-    source = (previous_run / "best_visible_solver.py").read_bytes()
-    if hashlib.sha256(source).hexdigest() != winner["sha256"]:
-        raise ValueError("Prior incumbent source hash mismatch")
-    if not winner.get("contract_valid") or winner.get("visible_score") is None:
-        raise ValueError("Prior incumbent has no valid visible score")
-    prior_eval = previous_run / "evaluations" / winner["label"] / "evomas_metrics.json"
-    if not prior_eval.is_file():
-        raise FileNotFoundError(prior_eval)
-    metrics = json.loads(prior_eval.read_text(encoding="utf-8"))
-    if (not metrics.get("contract_valid") or
-            abs(metrics["bbo_score"] - winner["visible_score"]) > 1e-9):
-        raise ValueError("Prior incumbent metric disagrees with visible winner")
-    staged = evaluation_dir / "continuation_incumbent"
-    staged.mkdir()
-    (staged / "candidate_solver.py").write_bytes(source)
-    (staged / "evomas_metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
-    return {"label": "continuation_incumbent", "contract_valid": True,
-            "selfcheck_passed": True, "visible_score": winner["visible_score"],
-            "sha256": winner["sha256"], "candidate_path": str(staged / "candidate_solver.py"),
-            "source_run": str(previous_run), "source_label": winner["label"],
-            "carried_without_new_selfcheck": True}
+def sanitize_working_pool(working_pool, tool_mode):
+    """Keep only runnable configurations, and repair copied index paths."""
+    rejected = []
+    quarantine = working_pool.parent / "rejected_pool_configs"
+    for path in sorted(working_pool.glob("*.yaml")):
+        try:
+            validated_config(path.read_text(encoding="utf-8"), tool_mode)
+        except (ValueError, TypeError, KeyError, yaml.YAMLError) as exc:
+            quarantine.mkdir(exist_ok=True)
+            shutil.move(str(path), str(quarantine / path.name))
+            rejected.append({"name": path.name, "reason": str(exc)[:1500]})
+    index_path = working_pool / "mas_index.json"
+    if index_path.is_file():
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        if not isinstance(index, dict):
+            raise ValueError("MAS index must be a JSON mapping")
+        index = {name: dict(entry, path=str(working_pool / (name + ".yaml")))
+                 for name, entry in index.items()
+                 if (working_pool / (name + ".yaml")).is_file()}
+        index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+    if rejected:
+        report = working_pool.parent / "rejected_pool_configs.json"
+        previous = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else []
+        report.write_text(json.dumps(previous + rejected, indent=2) + "\n",
+                          encoding="utf-8")
+    if not list(working_pool.glob("*.yaml")):
+        raise ValueError("No valid MAS configurations remain in the working pool")
+    return rejected
 
 
 def copy_initial_memory(source, destination):
@@ -236,7 +230,7 @@ def copy_initial_memory(source, destination):
     return migrated
 
 
-def select_best_visible(candidates, expected_count, output_dir, dry_run, incumbent=None):
+def select_best_visible(candidates, expected_count, output_dir, dry_run):
     if len(candidates) != expected_count:
         raise RuntimeError("complete solver count differs from --solver-limit")
     if any(item["visible_score"] is not None and
@@ -244,8 +238,6 @@ def select_best_visible(candidates, expected_count, output_dir, dry_run, incumbe
         raise ValueError("non-finite or out-of-range visible score")
     eligible = [item for item in candidates
                 if item.get("contract_valid", True) and item["visible_score"] is not None]
-    if incumbent is not None:
-        eligible.append(incumbent)
     if not eligible:
         raise RuntimeError("no BBO-contract-valid solver among completed versions")
     winner = max(eligible, key=lambda item: item["visible_score"])
@@ -299,7 +291,7 @@ def evaluate_config(
     try:
         runtime_summary = execute_mas(
             config_path, instruction, run_dir, dry_run=False,
-            tool_mode=tool_mode, feedback=feedback,
+            tool_mode=tool_mode, feedback=feedback, container=container,
         )
     except CandidateExtractionError as exc:
         # Preserve the raw agent report and count this generated version as invalid.
@@ -373,7 +365,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--initial-memory", type=Path, help="Optional prior EvoMAS action memory JSON")
     parser.add_argument("--continue-from-run", type=Path,
-                        help="Carry public visible solver/trajectory and memory from a completed run")
+                        help="Carry only EvoMAS memory from a completed run; pool is chosen separately")
     parser.add_argument(
         "--mutation-probability",
         type=float,
@@ -436,23 +428,29 @@ def main():
     args.output_dir.mkdir(parents=True)
     working_pool = args.output_dir / "working_pool"
     shutil.copytree(args.seed_pool, working_pool)
+    rejected_pool_configs = sanitize_working_pool(working_pool, args.tool_mode)
+    normalize_basic_pool_seeds(working_pool, seed_policy, original_seed_names)
+    if len(list(working_pool.glob("*.yaml"))) < args.num_parents:
+        raise ValueError("Too few valid MAS configurations after pool validation")
 
     evaluation_dir = args.output_dir / "evaluations"
     evaluation_dir.mkdir()
 
     instruction_text = args.instruction.read_text(encoding="utf-8")
     task_query = "RSI-Exam Query-Budgeted Noisy Black-Box Optimization"
-    task_description = instruction_text[:4000]
+    task_description = instruction_text[:4000] + (
+        "\nResearch focus for the EvoMAS configuration: 120 evaluations in 10D with "
+        "noisy losses. Ask the agents to compare bounded covariance adaptation, "
+        "local exploitation and noise-aware incumbent selection against global "
+        "space filling. Preserve enough exploration and bounded per-query work "
+        "for the aggregate sealed runtime. These are hypotheses to evaluate "
+        "with public selfcheck, not hardcoded optimizer output."
+    )
     task_samples = [{"query": task_description}]
 
-    initial_feedback = None
     memory_source = args.initial_memory
     if args.continue_from_run:
-        initial_feedback, memory_source = load_prior_run(args.continue_from_run)
-        incumbent = stage_prior_incumbent(args.continue_from_run, args.output_dir,
-                                          evaluation_dir)
-    else:
-        incumbent = None
+        memory_source = load_prior_memory(args.continue_from_run)
     if memory_source:
         if not memory_source.is_file():
             raise FileNotFoundError(memory_source)
@@ -531,22 +529,13 @@ def main():
             task_description,
             model_list=["openai:deepseek-v4-flash-s2"],
         )
-        # Restore fixed tools only for the six original upstream seeds.
-        # A configuration accepted into a previous working pool retains the
-        # tool assignments learned by EvoMAS.
         try:
-            if not args.continue_from_run and should_restore_basic_tools(
-                    seed_policy, original_seed_names, parent_path):
-                generated = restore_basic_seed_tools(generated)
             validated_config(generated, args.tool_mode)
         except (ValueError, TypeError, KeyError) as exc:
             rejected = evaluation_dir / f"parent_{index:02d}.rejected.yaml"
             rejected.write_text(generated, encoding="utf-8")
             (evaluation_dir / f"parent_{index:02d}.fallback_reason.txt").write_text(str(exc))
             generated = Path(parent_path).read_text(encoding="utf-8")
-            if not args.continue_from_run and should_restore_basic_tools(
-                    seed_policy, original_seed_names, parent_path):
-                generated = restore_basic_seed_tools(generated)
             generated = validated_config(generated, args.tool_mode)
         parent_metrics = evaluate_config(
             generated,
@@ -556,7 +545,6 @@ def main():
             args.container,
             args.dry_run,
             args.tool_mode,
-            feedback=initial_feedback,
         )
         configs.append(generated)
         metrics.append(parent_metrics)
@@ -574,13 +562,6 @@ def main():
         old_index = best_index
         feedback = (None if args.dry_run else build_research_feedback(
             evaluation_dir, candidates, metrics, best_index))
-        if incumbent is not None and incumbent["visible_score"] >= max(
-                (item["visible_score"] for item in candidates
-                 if item["visible_score"] is not None), default=-1.0):
-            feedback = dict(initial_feedback)
-            feedback["summary"] += ("\nLatest generated candidate diagnostics:\n"
-                                    + build_research_feedback(evaluation_dir, candidates,
-                                                              metrics, best_index)["summary"][:3000])
         use_mutation = (
             args.num_parents == 1
             or evolution_rng.random() < args.mutation_probability
@@ -654,6 +635,7 @@ def main():
         )
 
     pool = ConfigurationPool(str(working_pool))
+    validated_config(configs[best_index], args.tool_mode)
     accepted = add_to_pool_if_better(
         pool,
         configs[best_index],
@@ -664,6 +646,11 @@ def main():
         threshold=args.improvement_threshold,
     )
     if accepted:
+        try:
+            validated_config(Path(accepted).read_text(encoding="utf-8"), args.tool_mode)
+        except (ValueError, TypeError, KeyError, yaml.YAMLError):
+            Path(accepted).unlink()
+            raise RuntimeError("EvoMAS pool write produced an invalid configuration; removed it")
         mas_index.add_config(accepted)
 
     # Mirror upstream's final execution of the reward-best configuration.
@@ -690,9 +677,11 @@ def main():
             time_seconds=metrics[best_index]["total_time"],
             is_winner=True,
         )
-    visible_winner = select_best_visible(
-        candidates, args.solver_limit, args.output_dir, args.dry_run, incumbent
-    )
+    # Keep the output itself safe to inherit, even if an upstream pool operation
+    # wrote a malformed YAML after the earlier import validation.
+    rejected_pool_configs.extend(sanitize_working_pool(working_pool, args.tool_mode))
+    visible_winner = select_best_visible(candidates, args.solver_limit,
+                                         args.output_dir, args.dry_run)
 
     trace = consolidate_evolution_trace(
         operations,
@@ -729,7 +718,7 @@ def main():
                                  for c in candidates),
         "candidates": candidates,
         "best_visible": visible_winner,
-        "incumbent_provenance": incumbent,
+        "rejected_inherited_pool_configs": rejected_pool_configs,
         "final_reward_best_metrics": final_metrics,
         "seed": args.seed,
         "operations": operations,

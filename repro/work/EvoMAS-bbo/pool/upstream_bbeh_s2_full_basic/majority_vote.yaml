@@ -10,6 +10,9 @@ agents:
     prompt: worker
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -21,6 +24,9 @@ agents:
     prompt: worker
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -32,6 +38,9 @@ agents:
     prompt: worker
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -43,6 +52,9 @@ agents:
     prompt: worker
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -54,6 +66,9 @@ agents:
     prompt: worker
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -65,6 +80,9 @@ agents:
     prompt: worker
     tools:
     - bbo_read_context
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null
@@ -78,6 +96,7 @@ agents:
     - bbo_read_context
     - bbo_write_candidate
     - bbo_preflight_candidate
+    - bbo_probe_candidate
     max_tokens: 4096
     temperature: 0.7
     device: null

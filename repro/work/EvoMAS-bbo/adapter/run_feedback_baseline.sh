@@ -12,9 +12,13 @@ CONTINUE_ARGS=()
 SEED_POOL="repro/work/EvoMAS-bbo/pool/upstream_bbeh_s2_full_basic"
 if [[ -n "${2:-}" ]]; then
   test -f "$2/summary.json"
-  test -d "$2/working_pool"
   CONTINUE_ARGS=(--continue-from-run "$2")
-  SEED_POOL="$2/working_pool"
+  # Start every run from the original, equally equipped seed MAS pool.
+  # Explicit opt-in retains valid evolved configurations, not prior solvers.
+  if [[ "${BBO_INHERIT_WORKING_POOL:-0}" == 1 ]]; then
+    test -d "$2/working_pool"
+    SEED_POOL="$2/working_pool"
+  fi
 fi
 
 set -a
@@ -28,14 +32,27 @@ test -n "$OPENAI_BASE_URL"
 test -d "$SEED_POOL"
 CONTAINER="${BBO_EVAL_CONTAINER:-bbo-evomas-visible-wenxinyi}"
 docker inspect -f '{{.State.Running}}' "$CONTAINER" | grep -qx true
+FOUND_PROJECT_ROOT="$(PYTHONPATH="$PWD/repro/work/EvoMAS-bbo/adapter${PYTHONPATH:+:$PYTHONPATH}" \
+  python -c 'from native_bbo_runtime import find_project_root; print(find_project_root())')"
+if [[ "$FOUND_PROJECT_ROOT" != "$PWD" ]]; then
+  printf 'Adapter resolved the wrong project root: %s\n' "$FOUND_PROJECT_ROOT" >&2
+  exit 1
+fi
+STARTER_SHA="$(python -c 'import hashlib,pathlib; print(hashlib.sha256(pathlib.Path("environment/methods/main/solver.py").read_bytes()).hexdigest())')"
+CONTAINER_STARTER_SHA="$(docker exec "$CONTAINER" python -c 'import hashlib,pathlib; print(hashlib.sha256(pathlib.Path("/app/methods/main/solver.py").read_bytes()).hexdigest())')"
+if [[ "$STARTER_SHA" != "$CONTAINER_STARTER_SHA" ]]; then
+  printf 'Official starter solver differs from local task copy; stop before model calls.\n' >&2
+  exit 1
+fi
 HIDDEN_ARGS=()
-if [[ "${BBO_RUN_HIDDEN:-0}" == 1 ]]; then
+if [[ "${BBO_RUN_HIDDEN:-1}" == 1 ]]; then
   test -f dsh_rsi_runs/bbo_noisy_continuous_prebuilt/task.toml
 fi
 python repro/work/EvoMAS-bbo/adapter/feedback_regression_smoke.py
+python repro/work/EvoMAS-bbo/adapter/tool_contract_smoke.py
 
 OUT="$PWD/repro/work/EvoMAS-bbo/outputs/live_tools_feedback_$(date -u +%Y%m%d_%H%M%S)"
-if [[ "${BBO_RUN_HIDDEN:-0}" == 1 ]]; then
+if [[ "${BBO_RUN_HIDDEN:-1}" == 1 ]]; then
   HIDDEN_ARGS=(--hidden-task-root "$PWD/dsh_rsi_runs/bbo_noisy_continuous_prebuilt"
                --hidden-jobs-dir "$OUT/harbor_jobs")
 fi

@@ -12,15 +12,16 @@ from smolagents import Tool
 
 
 CATALOG = {
-    "bbo_read_context": "Read the public BBO instruction.md or this agent's candidate.py only.",
+    "bbo_read_context": "Read the public BBO instruction.md or this agent's candidate.py only; candidate.py begins with the official starter.",
     "bbo_write_candidate": "Write this agent's candidate.py in its isolated research scratch folder.",
     "bbo_preflight_candidate": "Check candidate.py syntax, Optimizer signatures, imports, and obvious duplicate query counting without executing it.",
+    "bbo_probe_candidate": "After writing candidate.py, run synthetic ask/tell interface and duplicate-query checks in the offline visible container; no objective or score.",
 }
 CATALOG_TEXT = (
     "BBO generation-stage tools (available now; YAML may assign any subset to agents):\n"
     + "\n".join(f"- {name}: {description}" for name, description in CATALOG.items())
     + "\nUse the YAML tool lists as the starting point; change them only when useful. "
-      "Assign bbo_write_candidate and bbo_preflight_candidate to the same agent if it needs to preflight a file. "
+      "Assign bbo_write_candidate with bbo_preflight_candidate and bbo_probe_candidate to an agent that needs to check its own candidate. "
       "These tools never call the objective, official selfcheck, or hidden evaluator. "
       "The submitted solver.py must use only Python standard library and NumPy."
 )
@@ -128,7 +129,7 @@ class BBOReadContext(_BBOBase):
             return "DENIED: only instruction.md and candidate.py are readable"
         if path.is_symlink() or not path.is_file():
             self._record(False)
-            return "MISSING: requested file does not exist"
+            return "MISSING: your candidate.py is absent; write your own candidate first"
         self._record()
         return path.read_text(encoding="utf-8")[:100_000]
 
@@ -169,14 +170,86 @@ class BBOPreflightCandidate(_BBOBase):
         return result
 
 
+class BBOProbeCandidate(_BBOBase):
+    name = "bbo_probe_candidate"
+    description = CATALOG[name]
+    inputs = {"item": {"type": "string", "description": "Exactly candidate.py, after this agent writes it"}}
+
+    def __init__(self, root: Path, agent_id: str, container: str | None = None):
+        self.container = container
+        super().__init__(root, agent_id)
+
+    def forward(self, item: str) -> str:
+        import subprocess
+        import uuid
+        from visible_selfcheck import CONTRACT_PROBE
+
+        path = self.scratch / "candidate.py"
+        if item != "candidate.py" or path.is_symlink() or not path.is_file():
+            self._record(False)
+            return "DENIED: probe requires your own candidate.py"
+        audit = self.root / "tool_audit.jsonl"
+        written = audit.is_file() and any(
+            event.get("agent") == self.agent_id
+            and event.get("tool") == "bbo_write_candidate"
+            and event.get("event") == "called" and event.get("success") is True
+            for line in audit.read_text(encoding="utf-8").splitlines()
+            if line.strip() for event in [json.loads(line)]
+        )
+        if not written or not self.container:
+            self._record(False)
+            return "DENIED: write your candidate first and use the configured offline visible container"
+        static = inspect_candidate(path.read_text(encoding="utf-8"))
+        if not static.startswith("PASS"):
+            self._record(False)
+            return static
+        remote = "/tmp/bbo_agent_probe_" + uuid.uuid4().hex + ".py"
+        try:
+            copied = subprocess.run(
+                ["docker", "cp", "-a", str(path), f"{self.container}:{remote}"],
+                capture_output=True, text=True, timeout=15, check=False)
+            if copied.returncode:
+                self._record(False)
+                return "FAIL: offline probe could not stage candidate: " + copied.stderr[-350:]
+            result = subprocess.run(
+                ["docker", "exec", self.container, "python", "-c", CONTRACT_PROBE, remote],
+                capture_output=True, text=True, timeout=30, check=False)
+            payload = next((json.loads(line.removeprefix("PROBE_JSON:"))
+                            for line in result.stdout.splitlines()
+                            if line.startswith("PROBE_JSON:")), None)
+            if not isinstance(payload, dict) or result.returncode or not payload.get("valid"):
+                self._record(False)
+                return "FAIL: synthetic ask/tell probe: " + (
+                    str(payload.get("error", "")) if isinstance(payload, dict)
+                    else (result.stderr or result.stdout)[-500:])
+            counts = [case.get("unique") for case in payload.get("cases", [])]
+            self._record(True)
+            return ("PASS: synthetic ask/tell only; unique proposed points per "
+                    "120-query case=" + str(counts) + "; warnings="
+                    + str(payload.get("warnings", []))
+                    + ". Repeats may denoise later choices; compare their benefit with lost exploration.")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self._record(False)
+            return "FAIL: offline probe unavailable: " + str(exc)[-350:]
+        finally:
+            try:
+                subprocess.run(["docker", "exec", self.container, "rm", "-f", remote],
+                               capture_output=True, timeout=5, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+
 _FACTORIES = {
     "bbo_read_context": BBOReadContext,
     "bbo_write_candidate": BBOWriteCandidate,
     "bbo_preflight_candidate": BBOPreflightCandidate,
+    "bbo_probe_candidate": BBOProbeCandidate,
 }
 
 
-def make_tool(name: str, root: Path, agent_id: str) -> Tool:
+def make_tool(name: str, root: Path, agent_id: str, container: str | None = None) -> Tool:
     if name not in _FACTORIES:
         raise ValueError(f"unknown BBO generation tool: {name}")
+    if name == "bbo_probe_candidate":
+        return BBOProbeCandidate(root, agent_id, container)
     return _FACTORIES[name](root, agent_id)

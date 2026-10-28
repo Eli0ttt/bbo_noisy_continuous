@@ -68,7 +68,8 @@ def submit(run_dir: Path, task_root: Path, jobs_dir: Path, harbor_bin: Path, mod
                "--model", model, "--mounts", json.dumps(mounts),
                "--agent-kwarg", "solver_sha256="+digest]
     env = os.environ.copy()
-    project = Path(__file__).resolve().parents[3]
+    from native_bbo_runtime import find_project_root
+    project = find_project_root()
     env["PYTHONPATH"] = str(project) + os.pathsep + env.get("PYTHONPATH", "")
     # Keep failed attempts in the active-time total while exposing the current
     # attempt separately. Historic summaries may only have hidden_seconds.
