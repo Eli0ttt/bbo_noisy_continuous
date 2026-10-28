@@ -30,6 +30,10 @@ ROLE_TASKS = {
     "judge": "Compare upstream BBO solver proposals for validity, noise awareness, bounds, query use, and likely anytime performance. Report actionable findings without accessing the objective or evaluator.",
 }
 ALLOWED_MODELS = {"openai:deepseek-v4-flash-s2"}
+
+
+class CandidateExtractionError(ValueError):
+    """The MAS ran, but produced no usable BBO source; this is a candidate failure."""
 def agent_instruction(agent) -> str:
     """Keep evolved prompt variants subordinate to BBO's required role contract."""
     role_defaults = {
@@ -53,7 +57,18 @@ def agent_instruction(agent) -> str:
         "the BBO task and required role output below take precedence over conflicts):\n"
         + agent.prompt
     )
-    return canonical + variant
+    return (canonical + variant +
+            "\nBBO tool contract: bbo_read_context(item='instruction.md') reads the "
+            "public task; bbo_read_context(item='candidate.py') reads only YOUR "
+            "candidate, after you have called bbo_write_candidate(source=...). "
+            "bbo_preflight_candidate(item='candidate.py') requires that same write "
+            "and checks syntax/interface statically, not runtime behavior. Other "
+            "agents' reports are passed in the EvoMAS context; their candidate.py "
+            "files are private and cannot be read here. Do not use open(), exec(), "
+            "importlib, os, sys, or traceback in CodeAgent's restricted interpreter "
+            "to inspect or execute the solver. Finish with complete fenced Python "
+            "source, even if you also wrote a file. A missing file or DENIED tool "
+            "response is a tool-contract mismatch; correct the argument or order.")
 
 def extract_candidate(content: str) -> str:
     def source_with_optimizer(source: str) -> bool:
@@ -108,7 +123,7 @@ def extract_candidate(content: str) -> str:
     candidate = unwrap(raw)
     if candidate is not None:
         return candidate
-    raise ValueError("No top-level Optimizer candidate or unambiguous solver_code string in final report")
+    raise CandidateExtractionError("No top-level Optimizer candidate or unambiguous solver_code string in final report")
 
 def validate(spec, tool_mode="none") -> list[list[str]]:
     if tool_mode not in {"none", "bbo"}:
@@ -139,8 +154,8 @@ def validate(spec, tool_mode="none") -> list[list[str]]:
         if set(agent.tools) - permitted_tools:
             raise ValueError(f"Unsupported tools for {aid}: {agent.tools}")
 
-    terminal = levels[-1]
-    if len(terminal) != 1:
+    terminal = [aid for aid in agents if not graph.get(aid)]
+    if len(terminal) != 1 or levels[-1] != terminal:
         raise ValueError("BBO adapter requires one terminal candidate-producing agent")
     terminal_role = agents[terminal[0]].role
     if terminal_role != "aggregator" and not (
@@ -208,10 +223,15 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
                 self.delegate.bbo_tool_root = output_dir
 
         def run(self, agent, text, context=None):
-            prior = ("\n\n## Prior best solver.py source for direct repair\n```python\n"
+            guidance = ("Preserve the incumbent's valid interface and working search "
+                        "components. Make one specific, defensible change aimed at the "
+                        "visible anytime/final weakness, and produce the full solver.py. "
+                        if feedback and feedback.get("source_contract_valid") else
+                        "Repair the incumbent's diagnosed contract failure and produce "
+                        "the full solver.py. ")
+            prior = ("\n\n## Prior incumbent solver.py source\n```python\n"
                      + feedback["solver_source"] + "\n```\n"
-                     "Repair the diagnosed defects in this source and propose a complete "
-                     "new solver.py; do not merely describe a patch.\n"
+                     + guidance + "Do not merely describe a patch.\n"
                      if feedback and agent.id == terminal_agent else "")
             result = self.delegate.run(
                 agent, agent_instruction(agent) + "\n\n" + text + prior, context
@@ -247,10 +267,10 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
     try:
         candidate = extract_candidate(final)
         candidate_source = "final_report"
-    except ValueError:
+    except CandidateExtractionError:
         # A CodeAgent may use the YAML-loaded writer and finish with a path-only
         # message. Accept only its own audited file, never another agent's file.
-        if tool_mode != "bbo" or not re.search(r"(?:candidate\.py|solver\.py)", final):
+        if tool_mode != "bbo":
             raise
         owned = output_dir / "tool_workspace" / terminal_agent / "candidate.py"
         audit_file = output_dir / "tool_audit.jsonl"

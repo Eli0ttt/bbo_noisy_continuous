@@ -99,6 +99,7 @@ def evaluate_solver(solver_text, output_dir, container):
         [
             "docker",
             "cp",
+            "-a",
             str(local_solver),
             f"{container}:{remote_solver}",
         ],

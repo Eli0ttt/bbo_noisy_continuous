@@ -21,7 +21,11 @@ except ImportError:
     sys.modules["smolagents"] = types.SimpleNamespace(Tool=type("Tool", (), {}))
 
 from visible_selfcheck import CONTRACT_PROBE, CandidateSelfcheckError, evaluate_solver
-from evomas_bbo_pipeline import build_research_feedback
+from evomas_bbo_pipeline import (build_research_feedback, load_prior_run,
+                                 copy_initial_memory, should_restore_basic_tools,
+                                 evaluate_config, validated_config,
+                                 stage_prior_incumbent, select_best_visible)
+from native_bbo_runtime import CandidateExtractionError, extract_candidate
 spec = importlib.util.spec_from_file_location("bbo_generation", UPSTREAM)
 tools = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tools)
@@ -68,6 +72,22 @@ def probe(source, folder):
 
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
+    seed_pool = ADAPTER.parent / "pool" / "upstream_bbeh_s2_full_basic"
+    if seed_pool.is_dir():
+        import yaml
+        for seed in seed_pool.glob("*.yaml"):
+            config = yaml.safe_load(seed.read_text(encoding="utf-8"))
+            assert all(agent.get("tools") for agent in config["agents"].values()), seed
+            assert any("bbo_write_candidate" in agent["tools"]
+                       for agent in config["agents"].values()), seed
+    assert extract_candidate("```python\n" + GOOD + "\n```") == GOOD.strip() + "\n"
+    for malformed in ("I will write code later", "```python\nprint('hi')\n```"):
+        try:
+            extract_candidate(malformed)
+        except CandidateExtractionError:
+            pass
+        else:
+            raise AssertionError("missing Optimizer was accepted")
     assert tools.inspect_candidate(GOOD).startswith("PASS")
     code, outcome = probe(GOOD, root)
     assert code == 0 and outcome["valid"] and not outcome["warnings"]
@@ -96,6 +116,59 @@ with tempfile.TemporaryDirectory() as temporary:
     assert feedback["solver_source"] == GOOD
     assert "example warning" in feedback["summary"]
     assert "visible=0.100000" in feedback["summary"]
+    assert feedback["source_contract_valid"]
+
+    (candidate / "evomas_metrics.json").write_text(json.dumps(metrics[0]))
+    (root / "best_visible_solver.py").write_text(GOOD)
+    (root / "memory.json").write_text("[]")
+    (root / "summary.json").write_text(json.dumps({
+        "best_visible": records[0], "candidates": records}))
+    carried, memory = load_prior_run(root)
+    assert carried["source_sha256"] == records[0]["sha256"]
+    assert memory == root / "memory.json"
+    (candidate / "evomas_metrics.json").write_text(json.dumps({
+        "bbo_score": 0.1, "contract_valid": True, "accuracy": 10.0,
+        "score_anytime": 0.07, "score_final": 0.17,
+        "mean_final_latent_objective": 40.0}))
+    next_run = root / "next_run"
+    next_run.mkdir()
+    next_eval = next_run / "evaluations"
+    next_eval.mkdir()
+    incumbent = stage_prior_incumbent(root, next_run, next_eval)
+    lower = {"label": "new_child", "contract_valid": True, "visible_score": 0.02,
+             "candidate_path": str(candidate / "candidate_solver.py"),
+             "sha256": records[0]["sha256"]}
+    assert select_best_visible([lower], 1, next_run, False, incumbent)["label"] == "continuation_incumbent"
+    (next_run / "summary.json").write_text(json.dumps({
+        "best_visible": incumbent, "incumbent_provenance": incumbent,
+        "candidates": [lower]}))
+    reused, _ = load_prior_run(next_run)
+    assert reused["source_sha256"] == records[0]["sha256"]
+    (root / "memory.json").write_text(json.dumps([{
+        "query": "BBO", "action": "mutation", "config_changes": "prompt",
+        "old_accuracy": 23.79, "new_accuracy": 15.48, "success": False,
+        "analysis": "wrong 2379 percent and unrelated BBEH interpretation"}]))
+    assert copy_initial_memory(root / "memory.json", root / "corrected_memory.json") == 1
+    normalized = json.loads((root / "corrected_memory.json").read_text())[0]
+    assert abs(normalized["old_accuracy"] - 0.2379) < 1e-12
+    assert "BBEH" not in normalized["analysis"]
+    originals = {"croto.yaml", "smoa.yaml"}
+    assert should_restore_basic_tools("basic", originals, root / "croto.yaml")
+    assert not should_restore_basic_tools("basic", originals, root / "evolved_01.yaml")
+    with patch("evomas_bbo_pipeline.execute_mas", side_effect=CandidateExtractionError("missing code")):
+        failed = evaluate_config("agents: {}\n", "invalid", root, root / "instruction.md",
+                                 "unused", False, "bbo")
+    assert not failed["contract_valid"] and not failed["selfcheck_passed"]
+    assert failed["accuracy"] < 0
+    assert (root / "invalid" / "aggregator_response.txt").exists() is False
+    assert "missing code" in (root / "invalid" / "selfcheck.json").read_text()
+    (root / "best_visible_solver.py").write_text(GOOD + "# tampered\n")
+    try:
+        load_prior_run(root)
+    except ValueError as exc:
+        assert "hash mismatch" in str(exc)
+    else:
+        raise AssertionError("tampered incumbent must be rejected")
 
     # Check orchestration: synthetic probe is not substituted for official selfcheck.
     calls = []
@@ -116,4 +189,4 @@ with tempfile.TemporaryDirectory() as temporary:
     assert verified["score"] == 0.1 and verified["contract_valid"]
     assert any("/app/selfcheck.py" in call for call in calls)
 
-print("PASS: valid, double-count, negative-allocation, visible-feedback, official-call cases")
+print("PASS: contract boundaries, public feedback, continuation integrity, official-call cases")
