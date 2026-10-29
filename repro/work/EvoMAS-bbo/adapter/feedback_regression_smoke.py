@@ -26,14 +26,17 @@ from evomas_bbo_pipeline import (build_research_feedback, load_prior_memory,
                                  normalize_basic_pool_seeds,
                                  retarget_unavailable_models,
                                  evaluate_config, validated_config,
+                                 mark_interrupted_candidate,
                                  sanitize_working_pool, select_best_visible)
 from native_bbo_runtime import (CandidateExtractionError, agent_instruction,
+                                MASExecutionFailure,
                                 extract_candidate, find_project_root,
                                 canonical_model_id, parse_model_pool,
                                 configure_allowed_models)
 spec = importlib.util.spec_from_file_location("bbo_generation", UPSTREAM)
 tools = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tools)
+from hidden_handoff import validate_completed_selection
 
 HEADER = '''import numpy as np
 class Optimizer:
@@ -90,6 +93,7 @@ with tempfile.TemporaryDirectory() as temporary:
             config = yaml.safe_load(seed.read_text(encoding="utf-8"))
             expected = ["bbo_read_context", "bbo_read_public_data",
                         "bbo_read_prior_feedback", "bbo_read_prior_trace",
+                        "bbo_read_history",
                         "bbo_write_candidate", "bbo_preflight_candidate",
                         "bbo_probe_candidate"]
             assert all(agent.get("tools") == expected
@@ -120,13 +124,21 @@ with tempfile.TemporaryDirectory() as temporary:
     assert public.forward("../hidden").startswith("DENIED")
     prior = tools.make_tool("bbo_read_prior_feedback", public_root, "worker")
     trace_tool = tools.make_tool("bbo_read_prior_trace", public_root, "worker")
+    history_tool = tools.make_tool("bbo_read_history", public_root, "worker")
     assert prior.forward("summary").startswith("NO_PRIOR_VERSION")
     assert trace_tool.forward("checkpoints").startswith("NO_PRIOR_VERSION")
+    assert history_tool.forward("index").startswith("NO_PRIOR_VERSION")
     (public_root / "tool_workspace" / "prior_feedback.json").write_text(json.dumps({
         "source_label": "step_01", "summary": "public feedback",
         "public_trace": [{"instance": 0, "latent_best_20_60_120": [4,3,2]}]}))
     assert json.loads(prior.forward("summary"))["source_label"] == "step_01"
     assert json.loads(trace_tool.forward("checkpoints"))[0]["instance"] == 0
+    (public_root / "tool_workspace" / "history.json").write_text(json.dumps([
+        {"label": "failed_00", "solver_source": "# failed", "visible_score": None,
+         "contract_valid": False, "sha256": "abc", "error": "bounds"}]))
+    assert json.loads(history_tool.forward("index"))[0]["label"] == "failed_00"
+    assert json.loads(history_tool.forward("failed_00"))["solver_source"] == "# failed"
+    assert history_tool.forward("../hidden").startswith("DENIED")
     tool_root = root / "agent_probe"
     tool_root.mkdir()
     writer = tools.make_tool("bbo_write_candidate", tool_root, "worker")
@@ -173,6 +185,8 @@ with tempfile.TemporaryDirectory() as temporary:
     assert "example warning" in feedback["summary"]
     assert "visible=0.100000" in feedback["summary"]
     assert feedback["source_contract_valid"]
+    assert feedback["history"][0]["label"] == "parent_00"
+    assert feedback["history"][0]["solver_source"] == GOOD
 
     (candidate / "evomas_metrics.json").write_text(json.dumps(metrics[0]))
     (root / "best_visible_solver.py").write_text(GOOD)
@@ -228,6 +242,29 @@ with tempfile.TemporaryDirectory() as temporary:
     assert failed["accuracy"] < 0
     assert (root / "invalid" / "aggregator_response.txt").exists() is False
     assert "missing code" in (root / "invalid" / "selfcheck.json").read_text()
+    with patch("evomas_bbo_pipeline.execute_mas",
+               side_effect=MASExecutionFailure("Request timed out.")):
+        timed_out = evaluate_config("agents: {}\n", "api_timeout", root,
+                                    root / "instruction.md", "offline", False, "bbo")
+    assert timed_out["contract_valid"] is False
+    assert "Request timed out" in (root / "api_timeout" / "selfcheck.json").read_text()
+    (root / "partial").mkdir()
+    assert mark_interrupted_candidate(root, "partial", "interrupted")["accuracy"] < 0
+    partial = root / "partial" / "evomas_metrics.json"
+    assert mark_interrupted_candidate(root, "partial", "interrupted") == json.loads(partial.read_text())
+    short = [{"label": "a", "contract_valid": True, "selfcheck_passed": True,
+              "sha256": "one"}]
+    validate_completed_selection({"candidates": short, "solver_limit": 12,
+                                  "completed_solver_versions": 1,
+                                  "best_visible": short[0]})
+    try:
+        validate_completed_selection({"candidates": short, "solver_limit": 12,
+                                      "completed_solver_versions": 1,
+                                      "best_visible": dict(short[0], contract_valid=False)})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid visible winner reached hidden handoff")
     sys.path.insert(0, str(ADAPTER.parent.parent / "EvoMAS-openai"))
     pool = root / "pool"
     pool.mkdir()
@@ -242,6 +279,10 @@ with tempfile.TemporaryDirectory() as temporary:
     assert (root / "rejected_pool_configs" / "invalid.yaml").is_file()
     index = json.loads((pool / "mas_index.json").read_text())
     assert list(index) == ["valid"] and index["valid"]["path"] == str(pool / "valid.yaml")
+    (pool / "mas_index.json").write_text("{invalid JSON")
+    rejected_index = sanitize_working_pool(pool, "bbo")
+    assert rejected_index[0]["name"] == "mas_index.json"
+    assert (root / "rejected_pool_configs" / "mas_index.invalid.json").exists()
 
     # Check orchestration: synthetic probe is not substituted for official selfcheck.
     calls = []

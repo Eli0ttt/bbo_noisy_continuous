@@ -11,6 +11,20 @@ import time
 from pathlib import Path
 
 
+def validate_completed_selection(summary: dict) -> None:
+    candidates = summary["candidates"]
+    completed = summary.get("completed_solver_versions", len(candidates))
+    if (not candidates
+            or len(candidates) != completed
+            or len(candidates) > summary["solver_limit"]
+            or any(type(item.get("contract_valid")) is not bool for item in candidates)
+            or summary["best_visible"].get("contract_valid") is not True
+            or summary["best_visible"].get("selfcheck_passed") is not True
+            or summary["best_visible"]["sha256"] not in
+               {item.get("sha256") for item in candidates if item.get("contract_valid")}):
+        raise ValueError("Completed candidates and the visible winner need valid contract records")
+
+
 def submit(run_dir: Path, task_root: Path, jobs_dir: Path, harbor_bin: Path, model: str):
     run_dir = run_dir.resolve()
     summary_file = run_dir / "summary.json"
@@ -29,11 +43,7 @@ def submit(run_dir: Path, task_root: Path, jobs_dir: Path, harbor_bin: Path, mod
         raise FileNotFoundError(f"Harbor task directory missing: {task_root}")
     if not harbor_bin.is_file():
         raise FileNotFoundError(f"Harbor executable missing: {harbor_bin}")
-    candidates = summary["candidates"]
-    if (len(candidates) != summary["solver_limit"]
-            or any(type(item.get("contract_valid")) is not bool for item in candidates)
-            or summary["best_visible"].get("contract_valid") is not True):
-        raise ValueError("All versions need contract checks and the visible winner must pass; use prepare_completed_run.py for legacy runs")
+    validate_completed_selection(summary)
     winner = run_dir / "best_visible_solver.py"
     source = winner.read_bytes()
     digest = hashlib.sha256(source).hexdigest()

@@ -13,6 +13,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -30,6 +31,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -47,6 +49,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -64,6 +67,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -81,6 +85,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -98,6 +103,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -115,6 +121,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -132,6 +139,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -149,6 +157,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -166,6 +175,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -183,6 +193,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -200,6 +211,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -217,6 +229,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -234,6 +247,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -251,6 +265,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -268,6 +283,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -285,6 +301,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -302,6 +319,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -319,6 +337,7 @@ agents:
     - bbo_read_public_data
     - bbo_read_prior_feedback
     - bbo_read_prior_trace
+    - bbo_read_history
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate

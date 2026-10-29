@@ -47,6 +47,7 @@ def main() -> None:
             if args.seed_tool_policy == "basic":
                 agent["tools"] = ["bbo_read_context", "bbo_read_public_data",
                                   "bbo_read_prior_feedback", "bbo_read_prior_trace",
+                                  "bbo_read_history",
                                   "bbo_write_candidate", "bbo_preflight_candidate",
                                   "bbo_probe_candidate"]
         back = yaml.safe_load(yaml.safe_dump(adapted, sort_keys=False))

@@ -75,6 +75,10 @@ class CandidateExtractionError(ValueError):
     """The MAS ran, but produced no usable BBO source; this is a candidate failure."""
 
 
+class MASExecutionFailure(RuntimeError):
+    """An individual EvoMAS candidate failed during native agent execution."""
+
+
 def agent_instruction(agent) -> str:
     """Keep evolved prompt variants subordinate to BBO's required role contract."""
     role_defaults = {
@@ -137,6 +141,12 @@ def agent_instruction(agent) -> str:
                         "sampled PUBLIC visible best-so-far checkpoints at "
                         "queries 20, 60 and 120, if available. The submitted "
                         "solver never receives these latent diagnostics.")
+    if "bbo_read_history" in assigned:
+        guidance.append("bbo_read_history(item='index') lists every completed "
+                        "candidate in this run, including invalid ones. Pass an "
+                        "exact listed label to read that version's solver source "
+                        "and error. These sources are research history only; a "
+                        "new independent run always starts from uniform random.")
     if "bbo_write_candidate" in assigned:
         guidance.append("bbo_write_candidate(source=...) takes complete Python "
                         "source and writes only YOUR candidate.py.")
@@ -281,6 +291,9 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
                 json.dumps({key: feedback.get(key) for key in
                             ("source_label", "summary", "public_trace")},
                            ensure_ascii=False), encoding="utf-8")
+            (work / "history.json").write_text(
+                json.dumps(feedback.get("history", []), ensure_ascii=False),
+                encoding="utf-8")
     task = ("RSI-Exam BBO optimizer generation. The goal is to MINIMIZE noisy y. "
             "No objective oracle is available to agents. Count actual evaluations "
             "exactly once across ask/tell: increment the counter in tell or ask, "
@@ -374,7 +387,7 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
     # Write the raw final output before parsing so malformed/novel formats remain diagnosable.
     (output_dir / "aggregator_response.txt").write_text(final, encoding="utf-8")
     if failures or final.startswith("Error:"):
-        raise RuntimeError(f"Agent failed; errors={failures}, final={final[:200]}")
+        raise MASExecutionFailure(f"Agent failed; errors={failures}, final={final[:200]}")
     try:
         candidate = extract_candidate(final)
         candidate_source = "final_report"

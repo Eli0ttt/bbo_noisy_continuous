@@ -506,11 +506,18 @@ class OpenAIModel:
             # Honor OpenAI-compatible endpoints such as the DeepSeek gateway.
             # Keep the upstream default behavior when OPENAI_BASE_URL is unset.
             base_url = os.environ.get("OPENAI_BASE_URL") or None
+            # A ten-retry, 120-second read timeout can stall one EvoMAS agent
+            # for more than twenty minutes during a gateway outage. Keep the
+            # SDK's own transient-error retry, but bound its cost per call.
+            retry_limit = int(os.environ.get("BBO_OPENAI_MAX_RETRIES", "1"))
+            request_timeout = float(os.environ.get("BBO_OPENAI_TIMEOUT", "120"))
+            if retry_limit < 0 or retry_limit > 10 or request_timeout <= 0:
+                raise ValueError("Invalid BBO OpenAI retry/timeout settings")
             self.client = openai.OpenAI(
                 api_key=self.api_key,
                 base_url=base_url,
-                max_retries=10,
-                timeout=120.0,
+                max_retries=retry_limit,
+                timeout=request_timeout,
             )
             logger.info(f"Initialized OpenAI model: {model}")
         except ImportError:

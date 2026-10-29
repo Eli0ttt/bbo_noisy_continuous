@@ -16,6 +16,7 @@ CATALOG = {
     "bbo_read_public_data": "Read a bounded summary or one named instance from the official public visible.json; never reads sealed data.",
     "bbo_read_prior_feedback": "Read the last completed version's public visible score, error and structured research feedback within THIS run.",
     "bbo_read_prior_trace": "Read bounded 20/60/120-query diagnostic trajectories sampled on PUBLIC visible cases from the preceding version in THIS run.",
+    "bbo_read_history": "List or read any complete or failed solver.py candidate from THIS research run; no earlier-run solver or hidden data.",
     "bbo_write_candidate": "Write this agent's candidate.py in its isolated research scratch folder.",
     "bbo_preflight_candidate": "Check candidate.py syntax, Optimizer signatures, imports, and obvious duplicate query counting without executing it.",
     "bbo_probe_candidate": "After writing candidate.py, run synthetic ask/tell interface and duplicate-query checks in the offline visible container; no objective or score.",
@@ -213,6 +214,30 @@ class BBOReadPriorTrace(_BBOBase):
             "status": "no public trajectory available for the previous version"})
 
 
+class BBOReadHistory(_BBOBase):
+    name = "bbo_read_history"
+    description = CATALOG[name]
+    inputs = {"item": {"type": "string", "description": "Exactly index or a candidate label from the index"}}
+
+    def forward(self, item: str) -> str:
+        path = self.root / "tool_workspace" / "history.json"
+        if path.is_symlink() or not path.is_file():
+            self._record()
+            return "NO_PRIOR_VERSION: no candidate from this run has completed"
+        history = json.loads(path.read_text(encoding="utf-8"))
+        if item == "index":
+            self._record()
+            return json.dumps([{k: v for k, v in entry.items() if k != "solver_source"}
+                               for entry in history], ensure_ascii=False)
+        entry = next((e for e in history if e["label"] == item), None)
+        if entry is None:
+            self._record(False)
+            return "DENIED: item must be index or an exact label from this run"
+        self._record()
+        answer = json.dumps(entry, ensure_ascii=False)
+        return answer if len(answer) <= 250_000 else "DENIED: candidate history entry is too long"
+
+
 class BBOWriteCandidate(_BBOBase):
     name = "bbo_write_candidate"
     description = CATALOG[name]
@@ -327,6 +352,7 @@ _FACTORIES = {
     "bbo_read_public_data": BBOReadPublicData,
     "bbo_read_prior_feedback": BBOReadPriorFeedback,
     "bbo_read_prior_trace": BBOReadPriorTrace,
+    "bbo_read_history": BBOReadHistory,
     "bbo_write_candidate": BBOWriteCandidate,
     "bbo_preflight_candidate": BBOPreflightCandidate,
     "bbo_probe_candidate": BBOProbeCandidate,

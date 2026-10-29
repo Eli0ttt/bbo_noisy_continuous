@@ -12,7 +12,7 @@ if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
   shift
 fi
 if [[ ! "$VERSIONS" =~ ^[0-9]+$ ]] || (( VERSIONS < 3 )); then
-  printf 'Usage: %s [solver_versions >= 3] [previous_completed_run] [--meta-model MODEL] [--model-pool MODEL,MODEL] [--mutation-probability 0..1] [--research-time-limit SECONDS]\n' "$0" >&2
+  printf 'Usage: %s [solver_versions >= 3] [previous_completed_run] [--resume-run UNFINISHED_DIR] [--meta-model MODEL] [--model-pool MODEL,MODEL] [--mutation-probability 0..1] [--research-time-limit SECONDS]\n' "$0" >&2
   exit 2
 fi
 CONTINUE_ARGS=()
@@ -35,20 +35,31 @@ META_MODEL="${BBO_META_MODEL:-deepseek-v4-flash-s1}"
 MODEL_POOL="${BBO_MODEL_POOL:-deepseek-v4-flash-s1,deepseek-v4-flash-s2}"
 MUTATION_PROBABILITY="${BBO_MUTATION_PROBABILITY:-0.8}"
 RESEARCH_TIME_LIMIT="${BBO_RESEARCH_TIME_LIMIT:-6750}"
+export BBO_OPENAI_MAX_RETRIES="${BBO_OPENAI_MAX_RETRIES:-1}"
+export BBO_OPENAI_TIMEOUT="${BBO_OPENAI_TIMEOUT:-120}"
+RESUME_RUN=""
 while (( $# )); do
   case "$1" in
-    --meta-model|--model-pool|--mutation-probability|--research-time-limit)
+    --meta-model|--model-pool|--mutation-probability|--research-time-limit|--resume-run)
       if (( $# < 2 )); then printf 'Missing value for %s\n' "$1" >&2; exit 2; fi
       case "$1" in
         --meta-model) META_MODEL="$2" ;;
         --model-pool) MODEL_POOL="$2" ;;
         --mutation-probability) MUTATION_PROBABILITY="$2" ;;
         --research-time-limit) RESEARCH_TIME_LIMIT="$2" ;;
+        --resume-run) RESUME_RUN="$2" ;;
       esac
       shift 2 ;;
     *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
+RESUME_ARGS=()
+if [[ -n "$RESUME_RUN" ]]; then
+  test -f "$RESUME_RUN/session_checkpoint.json"
+  SEED_POOL="$RESUME_RUN/working_pool"
+  CONTINUE_ARGS=()
+  RESUME_ARGS=(--resume-existing)
+fi
 test -n "$OPENAI_API_KEY"
 test -n "$OPENAI_BASE_URL"
 test -d "$SEED_POOL"
@@ -71,9 +82,10 @@ if [[ "${BBO_RUN_HIDDEN:-1}" == 1 ]]; then
   test -f dsh_rsi_runs/bbo_noisy_continuous_prebuilt/task.toml
 fi
 python repro/work/EvoMAS-bbo/adapter/feedback_regression_smoke.py
+python repro/work/EvoMAS-bbo/adapter/session_recovery_smoke.py
 python repro/work/EvoMAS-bbo/adapter/tool_contract_smoke.py
 
-OUT="$PWD/repro/work/EvoMAS-bbo/outputs/live_tools_feedback_$(date -u +%Y%m%d_%H%M%S)"
+OUT="${RESUME_RUN:-$PWD/repro/work/EvoMAS-bbo/outputs/live_tools_feedback_$(date -u +%Y%m%d_%H%M%S)}"
 if [[ "${BBO_RUN_HIDDEN:-1}" == 1 ]]; then
   HIDDEN_ARGS=(--hidden-task-root "$PWD/dsh_rsi_runs/bbo_noisy_continuous_prebuilt"
                --hidden-jobs-dir "$OUT/harbor_jobs")
@@ -86,6 +98,7 @@ python repro/work/EvoMAS-bbo/adapter/evomas_bbo_pipeline.py \
   --seed-pool "$SEED_POOL" \
   --instruction instruction.md \
   --output-dir "$OUT" \
+  "${RESUME_ARGS[@]}" \
   --container "$CONTAINER" \
   --meta-model "$META_MODEL" \
   --model-pool "$MODEL_POOL" \
@@ -99,7 +112,7 @@ python repro/work/EvoMAS-bbo/adapter/evomas_bbo_pipeline.py \
   --seed 43 \
   "${CONTINUE_ARGS[@]}" \
   "${HIDDEN_ARGS[@]}" \
-  2>&1 | tee "${OUT}.log"
+  2>&1 | tee -a "${OUT}.log"
 
 python - "$OUT/summary.json" <<'PY'
 import json
