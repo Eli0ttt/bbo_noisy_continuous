@@ -324,7 +324,10 @@ class SmolagentsRunner(BaseAgentRunner):
                             "Loaded PythonInterpreterTool for agent %s",
                             spec.id,
                         )
-                    elif tool_spec in {"bbo_read_context", "bbo_write_candidate", "bbo_preflight_candidate", "bbo_probe_candidate"}:
+                    elif tool_spec in {"bbo_read_context", "bbo_read_public_data",
+                                       "bbo_read_prior_feedback", "bbo_read_prior_trace",
+                                       "bbo_write_candidate", "bbo_preflight_candidate",
+                                       "bbo_probe_candidate"}:
                         from src.tools.bbo_generation import make_tool
                         from pathlib import Path
                         root = getattr(self, "bbo_tool_root", None)

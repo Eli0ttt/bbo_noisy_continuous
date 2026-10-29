@@ -1,32 +1,32 @@
 {
   "configs": {
     "croto.yaml": {
-      "adapted_sha256": "4dccbf7d5a72995f21d7ed0d9ff0bd321bd83533cf1ed501007ce41f38af80be",
+      "adapted_sha256": "4dceab23cf07a43a30157061d89caf598d94a4093374d755cb86f54158a9fd9d",
       "agent_count": 14,
       "upstream_sha256": "6c6344d6f1bea32fde4be0e205aac120ad727ded0e0161a626edfa3bbc56083a"
     },
     "debate.yaml": {
-      "adapted_sha256": "3763255bb6a1c3815757918b66cb6f664a17670fb98470702b69d740fc213a54",
+      "adapted_sha256": "600f6e13cd34f5ad097db0807ef14d5979145a1de982c92c04692e33e55f77fd",
       "agent_count": 19,
       "upstream_sha256": "6d588373e17b242dc7ce968008fce3a763fcd1fd0beaa3e82449e1096c7c2b4c"
     },
     "majority_vote.yaml": {
-      "adapted_sha256": "612af5b6d702f6ea7fd88809b22d3fbc41602ca898a139ded1c1fce190617218",
+      "adapted_sha256": "ea13ef0b0ae9aa6beb626629f6202b42565a94e24931116d2c03a62f5feef1b3",
       "agent_count": 7,
       "upstream_sha256": "6addefa32a5adf7d61812170d875f13aa7904ab04ae11fd31e75e54358d918ca"
     },
     "peer_review.yaml": {
-      "adapted_sha256": "57b8e28e4eb49a81caeba9e84fc246954ec2ac157253b2f5490a23937859c53c",
+      "adapted_sha256": "68a247a6bb6d3215de8722a34fa86d1a8a2248f73395acd7f37cddaf7a6241d1",
       "agent_count": 19,
       "upstream_sha256": "98479becdc3976aaf2f95d1af3a011eff031a09c5f9e57f67400033f93025f4a"
     },
     "single_codeagent.yaml": {
-      "adapted_sha256": "0da687a6bd72fffe0894f1bf54d213ff06073acd8a754c709e4ea8f2be4dc12f",
+      "adapted_sha256": "ba19c442d17c0231d9a2db8170247a61b9ad2ed395f24941b79cacd5b282e6c3",
       "agent_count": 1,
       "upstream_sha256": "0b5728c52f881e68d186f998f2b841b156bb233be1d6e022a9cec406fc54face"
     },
     "smoa.yaml": {
-      "adapted_sha256": "4480f27b74b4147eec7a95ed7938f5e62180e9c9d316bab8ae619089ea2a29a6",
+      "adapted_sha256": "abd599e9b003b2f3950dc9a4c6ed4329d899fc9a342e9080fbb91f81c69b8ee3",
       "agent_count": 11,
       "upstream_sha256": "8326083c34ae1dc92c7e657ab5e965377ca3aade71c659bba477832222f5acef"
     }

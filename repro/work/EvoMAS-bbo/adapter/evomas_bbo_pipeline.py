@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 import shutil
 import sys
@@ -16,8 +17,9 @@ import yaml
 ADAPTER_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ADAPTER_DIR))
 
-from native_bbo_runtime import (CandidateExtractionError, execute as execute_mas,
-                                validate as validate_mas)
+from native_bbo_runtime import (CandidateExtractionError, canonical_model_id,
+                                configure_allowed_models, execute as execute_mas,
+                                parse_model_pool, validate as validate_mas)
 
 
 def validated_config(config_text, tool_mode):
@@ -64,7 +66,8 @@ def restore_basic_seed_tools(config_text: str) -> str:
     terminal = {aid for aid in agents if not reports.get(aid)}
     if len(terminal) != 1:
         raise ValueError("Basic tool seed requires one terminal candidate agent")
-    initial_tools = ["bbo_read_context", "bbo_write_candidate",
+    initial_tools = ["bbo_read_context", "bbo_read_public_data", "bbo_read_prior_feedback",
+                     "bbo_read_prior_trace", "bbo_write_candidate",
                      "bbo_preflight_candidate", "bbo_probe_candidate"]
     for agent in agents.values():
         agent["tools"] = list(initial_tools)
@@ -85,6 +88,28 @@ def normalize_basic_pool_seeds(working_pool, seed_policy, original_seed_names):
         if path.is_file():
             path.write_text(restore_basic_seed_tools(path.read_text(encoding="utf-8")),
                             encoding="utf-8")
+
+
+def retarget_unavailable_models(working_pool, model_pool):
+    """Retain valid MAS topology/tools when a past model is unavailable today."""
+    changed = []
+    for path in sorted(working_pool.glob("*.yaml")):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            continue  # sanitize_working_pool will quarantine this file.
+        if not isinstance(data, dict) or not isinstance(data.get("agents"), dict):
+            continue
+        replaced = {}
+        for aid, agent in data["agents"].items():
+            if isinstance(agent, dict) and agent.get("model_id") not in model_pool:
+                replaced[aid] = agent.get("model_id")
+                agent["model_id"] = model_pool[0]
+        if replaced:
+            path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+            changed.append({"config": path.name, "from": replaced,
+                            "to": model_pool[0]})
+    return changed
 
 
 def metrics_from_bbo(result, runtime_summary, elapsed):
@@ -163,9 +188,17 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
                + "\n".join(assessments) + "\nPrior MAS agent trajectory:\n"
                + "\n".join(agents[:24]) + "\nPrior tool calls:\n"
                + "\n".join(tool_events))
+    trace_path = best_dir / "public_trace.json"
+    if trace_path.is_file():
+        trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        summary += ("\nPUBLIC visible diagnostic traces for incumbent (sampled "
+                    "instances and seeds; checkpoints 20, 60, 120): "
+                    + json.dumps(trace, separators=(",", ":"))[:1700])
     return {"source_label": best["label"], "source_sha256": best["sha256"],
             "source_contract_valid": bool(valid),
-            "summary": summary[:9500], "solver_source": source}
+            "summary": summary[:11500], "solver_source": source,
+            "public_trace": json.loads(trace_path.read_text(encoding="utf-8"))
+                if trace_path.is_file() else None}
 
 
 def load_prior_memory(run_dir):
@@ -354,13 +387,17 @@ def main():
     parser.add_argument("--container")
     parser.add_argument(
         "--meta-model",
-        default="openai:deepseek-v4-flash-s2",
+        default="deepseek-v4-flash-s1",
     )
+    parser.add_argument("--model-pool", default="deepseek-v4-flash-s1,deepseek-v4-flash-s2",
+                        help="Comma- or space-separated exact model IDs for MAS agents")
     parser.add_argument("--num-parents", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--skip-final-repeat", action="store_true",
                         help="Count only distinct candidate MAS executions; omits upstream final rerun")
-    parser.add_argument("--solver-limit", "--max-solver-versions", dest="solver_limit", type=int, default=6)
+    parser.add_argument("--solver-limit", "--max-solver-versions", dest="solver_limit", type=int, default=12)
+    parser.add_argument("--research-time-limit", type=float, default=6750,
+                        help="Soft wall-time target in seconds for MAS research; finish an in-flight version")
     parser.add_argument("--tool-mode", choices=("none", "bbo"), default="none")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--initial-memory", type=Path, help="Optional prior EvoMAS action memory JSON")
@@ -382,6 +419,10 @@ def main():
                         help="Harbor jobs output directory (requires --hidden-task-root)")
     args = parser.parse_args()
     run_started = time.monotonic()
+    args.meta_model = canonical_model_id(args.meta_model)
+    args.model_pool = parse_model_pool(args.model_pool)
+    configure_allowed_models(args.model_pool)
+    os.environ["EVOMAS_ALLOWED_MODELS"] = " ".join(args.model_pool)
     if bool(args.hidden_task_root) != bool(args.hidden_jobs_dir):
         raise ValueError("Provide both --hidden-task-root and --hidden-jobs-dir")
     if args.dry_run and args.hidden_task_root:
@@ -400,6 +441,8 @@ def main():
         raise ValueError("solver limit must equal parents + evolution steps + optional final execution")
     if not 0.0 <= args.mutation_probability <= 1.0:
         raise ValueError("--mutation-probability must be in [0, 1]")
+    if args.research_time_limit <= 0:
+        raise ValueError("--research-time-limit must be positive")
     if args.output_dir.exists():
         raise FileExistsError(
             f"Refusing to overwrite output directory: {args.output_dir}"
@@ -428,6 +471,7 @@ def main():
     args.output_dir.mkdir(parents=True)
     working_pool = args.output_dir / "working_pool"
     shutil.copytree(args.seed_pool, working_pool)
+    retargeted_models = retarget_unavailable_models(working_pool, args.model_pool)
     rejected_pool_configs = sanitize_working_pool(working_pool, args.tool_mode)
     normalize_basic_pool_seeds(working_pool, seed_policy, original_seed_names)
     if len(list(working_pool.glob("*.yaml"))) < args.num_parents:
@@ -443,8 +487,16 @@ def main():
         "noisy losses. Ask the agents to compare bounded covariance adaptation, "
         "local exploitation and noise-aware incumbent selection against global "
         "space filling. Preserve enough exploration and bounded per-query work "
-        "for the aggregate sealed runtime. These are hypotheses to evaluate "
-        "with public selfcheck, not hardcoded optimizer output."
+        "for the aggregate sealed runtime. Select compact MAS topologies when "
+        "they can produce comparable complete solvers, so the research budget "
+        "supports more distinct public-feedback iterations. Inspect per-stage "
+        "PUBLIC traces before making one controlled change: tell the solver only "
+        "the noisy observations, separate observed and latent diagnostics, and "
+        "compare 20/60/120-query checkpoints. Do not assume the public instances' "
+        "optima or coefficients are available in sealed runs. Consider centered "
+        "bounded designs, covariance adaptation, local trust regions or lightweight "
+        "surrogate screening; do not forbid a family without a timed public test. "
+        "These are hypotheses to evaluate with public selfcheck, not hardcoded output."
     )
     task_samples = [{"query": task_description}]
 
@@ -527,7 +579,7 @@ def main():
             parent_path,
             task_samples,
             task_description,
-            model_list=["openai:deepseek-v4-flash-s2"],
+            model_list=args.model_pool,
         )
         try:
             validated_config(generated, args.tool_mode)
@@ -558,7 +610,15 @@ def main():
     operations = []
 
     evolution_rng = random.Random(args.seed)
+    stopped_for_time = False
+    longest_version_seconds = max((item["total_time"] for item in metrics), default=0.0)
     for step in range(1, args.max_steps + 1):
+        # Complete in-flight candidates and keep a hidden-verification reserve.
+        # Agent latency can be much longer than the visible selfcheck itself.
+        elapsed = time.monotonic() - run_started
+        if elapsed + max(300.0, longest_version_seconds * 1.2) >= args.research_time_limit:
+            stopped_for_time = True
+            break
         old_index = best_index
         feedback = (None if args.dry_run else build_research_feedback(
             evaluation_dir, candidates, metrics, best_index))
@@ -572,7 +632,7 @@ def main():
                 configs[best_index],
                 metrics[best_index],
                 feedback["summary"] if feedback is not None else "dry-run feedback",
-                model_list=["openai:deepseek-v4-flash-s2"],
+                model_list=args.model_pool,
             )
             action = "mutation"
         else:
@@ -586,7 +646,7 @@ def main():
                 configs[ranked[1]],
                 metrics[ranked[0]],
                 metrics[ranked[1]],
-                model_list=["openai:deepseek-v4-flash-s2"],
+                model_list=args.model_pool,
             )
             action = "crossover"
 
@@ -614,6 +674,7 @@ def main():
 
         configs.append(offspring)
         metrics.append(child_metrics)
+        longest_version_seconds = max(longest_version_seconds, child_metrics["total_time"])
         rewards.append(child_reward)
         record_candidate(f"step_{step:02d}_{action}", child_metrics)
         best_index = max(range(len(rewards)), key=rewards.__getitem__)
@@ -680,7 +741,7 @@ def main():
     # Keep the output itself safe to inherit, even if an upstream pool operation
     # wrote a malformed YAML after the earlier import validation.
     rejected_pool_configs.extend(sanitize_working_pool(working_pool, args.tool_mode))
-    visible_winner = select_best_visible(candidates, args.solver_limit,
+    visible_winner = select_best_visible(candidates, len(candidates),
                                          args.output_dir, args.dry_run)
 
     trace = consolidate_evolution_trace(
@@ -707,11 +768,17 @@ def main():
         "hidden_status": "not_run",
         "hidden_score": None,
         "seed_pool": str(args.seed_pool),
+        "meta_model": args.meta_model,
+        "model_pool": args.model_pool,
+        "retargeted_seed_models": retargeted_models,
         "seed_tool_policy": seed_policy,
         "working_pool": str(working_pool),
         "num_parents": len(parent_paths),
         "max_steps": args.max_steps,
         "solver_limit": args.solver_limit,
+        "completed_solver_versions": len(candidates),
+        "stopped_for_time": stopped_for_time,
+        "research_time_limit_seconds": args.research_time_limit,
         "final_repeat_executed": not args.skip_final_repeat,
         "tool_mode": args.tool_mode,
         "tool_use_observed": any(c.get("configured_tools") and c.get("tool_calls", 0) > 0
@@ -749,7 +816,7 @@ def main():
         from hidden_handoff import submit
         summary = submit(args.output_dir, args.hidden_task_root, args.hidden_jobs_dir,
                          Path.home()/".local/share/uv/tools/harbor/bin/harbor",
-                         "deepseek-v4-flash-s2")
+                         args.meta_model.removeprefix("openai:"))
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 

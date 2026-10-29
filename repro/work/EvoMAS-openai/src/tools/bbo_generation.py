@@ -13,6 +13,9 @@ from smolagents import Tool
 
 CATALOG = {
     "bbo_read_context": "Read the public BBO instruction.md or this agent's candidate.py only; candidate.py begins with the official starter.",
+    "bbo_read_public_data": "Read a bounded summary or one named instance from the official public visible.json; never reads sealed data.",
+    "bbo_read_prior_feedback": "Read the last completed version's public visible score, error and structured research feedback within THIS run.",
+    "bbo_read_prior_trace": "Read bounded 20/60/120-query diagnostic trajectories sampled on PUBLIC visible cases from the preceding version in THIS run.",
     "bbo_write_candidate": "Write this agent's candidate.py in its isolated research scratch folder.",
     "bbo_preflight_candidate": "Check candidate.py syntax, Optimizer signatures, imports, and obvious duplicate query counting without executing it.",
     "bbo_probe_candidate": "After writing candidate.py, run synthetic ask/tell interface and duplicate-query checks in the offline visible container; no objective or score.",
@@ -134,6 +137,82 @@ class BBOReadContext(_BBOBase):
         return path.read_text(encoding="utf-8")[:100_000]
 
 
+class BBOReadPublicData(_BBOBase):
+    name = "bbo_read_public_data"
+    description = CATALOG[name]
+    inputs = {"item": {"type": "string", "description": "Exactly summary or instance_0 through instance_11"}}
+
+    def forward(self, item: str) -> str:
+        if item != "summary" and not re.fullmatch(r"instance_(0|[1-9][0-9]?)", item):
+            self._record(False)
+            return "DENIED: choose summary or a numbered public visible instance"
+        task_root = next((p for p in Path(__file__).resolve().parents
+                          if (p / "environment/methods/main/solver.py").is_file()), None)
+        if task_root is None:
+            self._record(False)
+            return "MISSING: public task checkout is unavailable"
+        public = task_root / "environment/data/visible.json"
+        if public.is_symlink() or not public.is_file():
+            self._record(False)
+            return "MISSING: official public visible.json is unavailable"
+        data = json.loads(public.read_text(encoding="utf-8"))
+        instances = data["instances"]
+        if item == "summary":
+            result = {"task_id": data.get("task_id"), "budget": data.get("budget"),
+                      "n_instances": len(instances),
+                      "instance_fields": sorted(instances[0]) if instances else []}
+        else:
+            index = int(item.split("_", 1)[1])
+            if index >= len(instances):
+                self._record(False)
+                return "DENIED: public instance index is out of range"
+            result = instances[index]
+        answer = json.dumps(result, ensure_ascii=False)
+        if len(answer) > 60_000:
+            self._record(False)
+            return "DENIED: public instance exceeds bounded tool response"
+        self._record(True)
+        return answer
+
+
+class BBOReadPriorFeedback(_BBOBase):
+    name = "bbo_read_prior_feedback"
+    description = CATALOG[name]
+    inputs = {"item": {"type": "string", "description": "Exactly summary"}}
+
+    def forward(self, item: str) -> str:
+        path = self.root / "tool_workspace" / "prior_feedback.json"
+        if item != "summary":
+            self._record(False)
+            return "DENIED: choose summary"
+        if path.is_symlink() or not path.is_file():
+            self._record()
+            return "NO_PRIOR_VERSION: this MAS starts a fresh research run"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self._record()
+        return json.dumps({"source_label": data["source_label"],
+                           "summary": data["summary"][:11000]}, ensure_ascii=False)
+
+
+class BBOReadPriorTrace(_BBOBase):
+    name = "bbo_read_prior_trace"
+    description = CATALOG[name]
+    inputs = {"item": {"type": "string", "description": "Exactly checkpoints"}}
+
+    def forward(self, item: str) -> str:
+        path = self.root / "tool_workspace" / "prior_feedback.json"
+        if item != "checkpoints":
+            self._record(False)
+            return "DENIED: choose checkpoints"
+        if path.is_symlink() or not path.is_file():
+            self._record()
+            return "NO_PRIOR_VERSION: this MAS starts a fresh research run"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self._record()
+        return json.dumps(data.get("public_trace") or {
+            "status": "no public trajectory available for the previous version"})
+
+
 class BBOWriteCandidate(_BBOBase):
     name = "bbo_write_candidate"
     description = CATALOG[name]
@@ -212,8 +291,9 @@ class BBOProbeCandidate(_BBOBase):
                 self._record(False)
                 return "FAIL: offline probe could not stage candidate: " + copied.stderr[-350:]
             result = subprocess.run(
-                ["docker", "exec", self.container, "python", "-c", CONTRACT_PROBE, remote],
-                capture_output=True, text=True, timeout=30, check=False)
+                ["docker", "exec", self.container, "python", "-c", CONTRACT_PROBE,
+                 remote, "--quick"],
+                capture_output=True, text=True, timeout=20, check=False)
             payload = next((json.loads(line.removeprefix("PROBE_JSON:"))
                             for line in result.stdout.splitlines()
                             if line.startswith("PROBE_JSON:")), None)
@@ -224,11 +304,14 @@ class BBOProbeCandidate(_BBOBase):
                     else (result.stderr or result.stdout)[-500:])
             counts = [case.get("unique") for case in payload.get("cases", [])]
             self._record(True)
-            return ("PASS: synthetic ask/tell only; unique proposed points per "
-                    "120-query case=" + str(counts) + "; warnings="
+            return ("PASS: quick synthetic ask/tell only; unique points per "
+                    "case=" + str(counts) + "; warnings="
                     + str(payload.get("warnings", []))
                     + ". Repeats may denoise later choices; compare their benefit with lost exploration.")
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired:
+            self._record(False)
+            return "FAIL: quick synthetic probe exceeded 20 seconds; candidate may be too slow for the official aggregate runtime"
+        except OSError as exc:
             self._record(False)
             return "FAIL: offline probe unavailable: " + str(exc)[-350:]
         finally:
@@ -241,6 +324,9 @@ class BBOProbeCandidate(_BBOBase):
 
 _FACTORIES = {
     "bbo_read_context": BBOReadContext,
+    "bbo_read_public_data": BBOReadPublicData,
+    "bbo_read_prior_feedback": BBOReadPriorFeedback,
+    "bbo_read_prior_trace": BBOReadPriorTrace,
     "bbo_write_candidate": BBOWriteCandidate,
     "bbo_preflight_candidate": BBOPreflightCandidate,
     "bbo_probe_candidate": BBOProbeCandidate,

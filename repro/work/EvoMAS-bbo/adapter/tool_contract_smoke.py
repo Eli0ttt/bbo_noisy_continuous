@@ -28,6 +28,9 @@ class FakeAgent:
     def run(self, task):
         assert self.tools["bbo_read_context"].forward("instruction.md") == "public task"
         assert self.tools["bbo_read_context"].forward("../secret").startswith("DENIED")
+        assert json.loads(self.tools["bbo_read_public_data"].forward("summary"))["n_instances"] == 12
+        assert self.tools["bbo_read_prior_feedback"].forward("summary").startswith("NO_PRIOR_VERSION")
+        assert self.tools["bbo_read_prior_trace"].forward("checkpoints").startswith("NO_PRIOR_VERSION")
         source = (
             "import numpy as np\nclass Optimizer:\n"
             " def __init__(self, dim, lower, upper, budget, seed, rng): pass\n"
@@ -67,7 +70,7 @@ def main():
             assert result.success, result.error
             events = [json.loads(line) for line in (root / "tool_audit.jsonl").read_text().splitlines()]
             assert len([e for e in events if e["event"] == "loaded"]) == len(CATALOG)
-            assert len([e for e in events if e["event"] == "called"]) == 5
+            assert len([e for e in events if e["event"] == "called"]) == 8
             assert inspect_candidate("class Optimizer: pass").startswith("FAIL")
     finally:
         src.models.get_model = old_model

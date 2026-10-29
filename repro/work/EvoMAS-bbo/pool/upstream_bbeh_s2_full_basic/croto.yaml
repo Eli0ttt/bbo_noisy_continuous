@@ -11,6 +11,9 @@ agents:
     prompt: team_worker
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -27,6 +30,9 @@ agents:
     prompt: team_worker
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -43,6 +49,9 @@ agents:
     prompt: team_worker
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -59,6 +68,9 @@ agents:
     prompt: team_worker
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -75,6 +87,9 @@ agents:
     prompt: aggregator_croto
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -89,6 +104,9 @@ agents:
     prompt: aggregator_croto
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -103,6 +121,9 @@ agents:
     prompt: aggregator_croto
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -117,6 +138,9 @@ agents:
     prompt: team_worker
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -132,6 +156,9 @@ agents:
     prompt: team_worker
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -147,6 +174,9 @@ agents:
     prompt: team_worker
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -162,6 +192,9 @@ agents:
     prompt: team_worker
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -177,6 +210,9 @@ agents:
     prompt: aggregator_croto
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -191,6 +227,9 @@ agents:
     prompt: aggregator_croto
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate
@@ -205,6 +244,9 @@ agents:
     prompt: aggregator_croto
     tools:
     - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
     - bbo_write_candidate
     - bbo_preflight_candidate
     - bbo_probe_candidate

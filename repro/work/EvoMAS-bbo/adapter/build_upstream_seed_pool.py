@@ -28,10 +28,8 @@ def main() -> None:
         raise ValueError("no upstream YAML files")
     if args.destination.exists():
         raise FileExistsError(args.destination)
-    if args.model != "openai:deepseek-v4-flash-s2":
-        raise ValueError("model must match the BBO adapter's allow-list")
-
-    from native_bbo_runtime import ROLE_TASKS
+    from native_bbo_runtime import ROLE_TASKS, canonical_model_id
+    args.model = canonical_model_id(args.model)
 
     args.destination.mkdir(parents=True)
     provenance = {"source": str(args.source), "model": args.model,
@@ -40,7 +38,6 @@ def main() -> None:
         original = yaml.safe_load(path.read_text(encoding="utf-8"))
         adapted = yaml.safe_load(path.read_text(encoding="utf-8"))
         before = {aid: agent["model_id"] for aid, agent in original["agents"].items()}
-        terminal = {aid for aid in adapted["agents"] if not adapted["topology"]["reports_to"].get(aid)}
         for aid, agent in adapted["agents"].items():
             agent["model_id"] = args.model
             if agent["prompt"] not in ROLE_TASKS and agent["role"] not in ROLE_TASKS:
@@ -48,9 +45,10 @@ def main() -> None:
             if agent.get("tools"):
                 raise ValueError(f"upstream tools must be empty in {path.name}")
             if args.seed_tool_policy == "basic":
-                agent["tools"] = (["bbo_read_context", "bbo_write_candidate",
-                                   "bbo_preflight_candidate"] if aid in terminal
-                                  else ["bbo_read_context"])
+                agent["tools"] = ["bbo_read_context", "bbo_read_public_data",
+                                  "bbo_read_prior_feedback", "bbo_read_prior_trace",
+                                  "bbo_write_candidate", "bbo_preflight_candidate",
+                                  "bbo_probe_candidate"]
         back = yaml.safe_load(yaml.safe_dump(adapted, sort_keys=False))
         for aid, agent in back["agents"].items():
             agent["model_id"] = before[aid]

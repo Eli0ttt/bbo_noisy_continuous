@@ -24,10 +24,13 @@ from visible_selfcheck import CONTRACT_PROBE, CandidateSelfcheckError, evaluate_
 from evomas_bbo_pipeline import (build_research_feedback, load_prior_memory,
                                  copy_initial_memory, should_restore_basic_tools,
                                  normalize_basic_pool_seeds,
+                                 retarget_unavailable_models,
                                  evaluate_config, validated_config,
                                  sanitize_working_pool, select_best_visible)
 from native_bbo_runtime import (CandidateExtractionError, agent_instruction,
-                                extract_candidate, find_project_root)
+                                extract_candidate, find_project_root,
+                                canonical_model_id, parse_model_pool,
+                                configure_allowed_models)
 spec = importlib.util.spec_from_file_location("bbo_generation", UPSTREAM)
 tools = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tools)
@@ -85,8 +88,10 @@ with tempfile.TemporaryDirectory() as temporary:
         import yaml
         for seed in seed_pool.glob("*.yaml"):
             config = yaml.safe_load(seed.read_text(encoding="utf-8"))
-            expected = ["bbo_read_context", "bbo_write_candidate",
-                        "bbo_preflight_candidate", "bbo_probe_candidate"]
+            expected = ["bbo_read_context", "bbo_read_public_data",
+                        "bbo_read_prior_feedback", "bbo_read_prior_trace",
+                        "bbo_write_candidate", "bbo_preflight_candidate",
+                        "bbo_probe_candidate"]
             assert all(agent.get("tools") == expected
                        for agent in config["agents"].values()), seed
     assert extract_candidate("```python\n" + GOOD + "\n```") == GOOD.strip() + "\n"
@@ -98,6 +103,30 @@ with tempfile.TemporaryDirectory() as temporary:
         else:
             raise AssertionError("missing Optimizer was accepted")
     assert tools.inspect_candidate(GOOD).startswith("PASS")
+    assert canonical_model_id("GLM-5.3-W4A8") == "openai:GLM-5.3-W4A8"
+    assert parse_model_pool("deepseek-v4-flash-s1,GLM-5.3-Flash") == [
+        "openai:deepseek-v4-flash-s1", "openai:GLM-5.3-Flash"]
+    try:
+        parse_model_pool("not-an-available-model")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unsupported model accepted")
+    public_root = root / "public_context"
+    public_root.mkdir()
+    public = tools.make_tool("bbo_read_public_data", public_root, "worker")
+    assert json.loads(public.forward("summary"))["n_instances"] == 12
+    assert json.loads(public.forward("instance_0"))["dim"] == 10
+    assert public.forward("../hidden").startswith("DENIED")
+    prior = tools.make_tool("bbo_read_prior_feedback", public_root, "worker")
+    trace_tool = tools.make_tool("bbo_read_prior_trace", public_root, "worker")
+    assert prior.forward("summary").startswith("NO_PRIOR_VERSION")
+    assert trace_tool.forward("checkpoints").startswith("NO_PRIOR_VERSION")
+    (public_root / "tool_workspace" / "prior_feedback.json").write_text(json.dumps({
+        "source_label": "step_01", "summary": "public feedback",
+        "public_trace": [{"instance": 0, "latent_best_20_60_120": [4,3,2]}]}))
+    assert json.loads(prior.forward("summary"))["source_label"] == "step_01"
+    assert json.loads(trace_tool.forward("checkpoints"))[0]["instance"] == 0
     tool_root = root / "agent_probe"
     tool_root.mkdir()
     writer = tools.make_tool("bbo_write_candidate", tool_root, "worker")
@@ -113,7 +142,7 @@ with tempfile.TemporaryDirectory() as temporary:
                 "CONTRACT_PASS\nPROBE_JSON:" + json.dumps(payload) + "\n", "")
         return subprocess.CompletedProcess(command, 0, "", "")
     with patch("subprocess.run", side_effect=fake_probe_docker) as mocked_probe:
-        assert "unique proposed points" in checker.forward("candidate.py")
+        assert "quick synthetic ask/tell" in checker.forward("candidate.py")
         assert any("docker" == call.args[0][0] and "python" in call.args[0]
                    for call in mocked_probe.call_args_list)
     code, outcome = probe(GOOD, root)
@@ -185,6 +214,13 @@ with tempfile.TemporaryDirectory() as temporary:
     assert all(a["tools"] == expected for a in yaml.safe_load(
         (copied / "croto.yaml").read_text())["agents"].values())
     assert (copied / "evolved_01.yaml").read_text() == evolved_text
+    active = parse_model_pool("GLM-5.3-W4A8")
+    rewritten = retarget_unavailable_models(copied, active)
+    assert len(rewritten) == 2
+    configure_allowed_models(active)
+    assert all(agent["model_id"] == active[0] for agent in yaml.safe_load(
+        (copied / "croto.yaml").read_text())["agents"].values())
+    configure_allowed_models(["openai:deepseek-v4-flash-s2"])
     with patch("evomas_bbo_pipeline.execute_mas", side_effect=CandidateExtractionError("missing code")):
         failed = evaluate_config("agents: {}\n", "invalid", root, root / "instruction.md",
                                  "unused", False, "bbo")
@@ -225,5 +261,24 @@ with tempfile.TemporaryDirectory() as temporary:
         verified = evaluate_solver(GOOD, root / "mock_score", "visible_container")
     assert verified["score"] == 0.1 and verified["contract_valid"]
     assert any("/app/selfcheck.py" in call for call in calls)
+    def invalid_solver_docker(command, **kwargs):
+        if "/app/selfcheck.py" in command:
+            return subprocess.CompletedProcess(command, 1, "",
+                'Traceback (most recent call last):\n  File "/app/selfcheck.py", line 112, in _validate_points\nValueError: ask returned an out-of-bounds point')
+        return fake_docker(command, **kwargs)
+    with patch("visible_selfcheck.subprocess.run", side_effect=invalid_solver_docker):
+        try:
+            evaluate_solver(GOOD, root / "mock_out_of_bounds", "visible_container")
+        except CandidateSelfcheckError as exc:
+            assert "out-of-bounds point" in str(exc)
+        else:
+            raise AssertionError("official harness contract failure was not classified as candidate failure")
+    (root / "bad_bounds").mkdir()
+    (root / "bad_bounds" / "candidate_solver.py").write_text(GOOD)
+    with patch("evomas_bbo_pipeline.execute_mas", return_value={"metadata": {}}), \
+         patch("visible_selfcheck.evaluate_solver", side_effect=CandidateSelfcheckError("out-of-bounds point")):
+        failed = evaluate_config("agents: {}\n", "bad_bounds", root, root / "instruction.md",
+                                 "visible_container", False, "bbo")
+    assert not failed["selfcheck_passed"] and failed["accuracy"] < 0
 
 print("PASS: contract boundaries, public feedback, continuation integrity, official-call cases")

@@ -73,5 +73,5 @@ if __name__ == "__main__":
         from hidden_handoff import submit
         result = submit(args.run_dir, args.hidden_task_root, args.hidden_jobs_dir,
                         Path.home()/".local/share/uv/tools/harbor/bin/harbor",
-                        "deepseek-v4-flash-s2")
+                        result.get("meta_model", "deepseek-v4-flash-s2").removeprefix("openai:"))
     print(json.dumps(result, indent=2))

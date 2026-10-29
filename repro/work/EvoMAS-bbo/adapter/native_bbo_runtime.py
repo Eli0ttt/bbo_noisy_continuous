@@ -29,7 +29,35 @@ ROLE_TASKS = {
     "processor": "Synthesize upstream BBO solver proposals into a concrete improvement. Include the algorithm, ask/tell interface checks, and, when useful, complete solver.py code. Do not call the objective or evaluator.",
     "judge": "Compare upstream BBO solver proposals for validity, noise awareness, bounds, query use, and likely anytime performance. Report actionable findings without accessing the objective or evaluator.",
 }
+SUPPORTED_MODELS = (
+    "openai:deepseek-v4-flash-s1",
+    "openai:deepseek-v4-flash-s2",
+    "openai:GLM-5.3-W4A8",
+    "openai:GLM-5.3-Flash",
+)
 ALLOWED_MODELS = {"openai:deepseek-v4-flash-s2"}
+
+
+def canonical_model_id(name: str) -> str:
+    model = name.strip()
+    if not model.startswith("openai:"):
+        model = "openai:" + model
+    if model not in SUPPORTED_MODELS:
+        raise ValueError(f"Unsupported BBO model {name!r}; choose from {SUPPORTED_MODELS}")
+    return model
+
+
+def parse_model_pool(value: str) -> list[str]:
+    models = list(dict.fromkeys(canonical_model_id(part)
+                                for part in value.replace(",", " ").split()))
+    if not models:
+        raise ValueError("BBO model pool must not be empty")
+    return models
+
+
+def configure_allowed_models(models):
+    ALLOWED_MODELS.clear()
+    ALLOWED_MODELS.update(models)
 
 
 def find_project_root(start: Path | None = None) -> Path:
@@ -83,6 +111,9 @@ def agent_instruction(agent) -> str:
                 "rates empirically instead of eliminating repeats blindly. "
                 "Estimate work per ask/tell "
                 "against 400 sealed runs and the aggregate runtime budget. "
+                "Consider bounded, vectorized surrogates and quadratic local "
+                "models if measured public runtime permits. Never optimize "
+                "synthetic uniqueness instead of official visible quality. "
                 "Treat these as design hypotheses, not guaranteed scores. "
                 "Assigned callable BBO tools for THIS agent: " +
                 (", ".join(sorted(assigned)) if assigned else "none") +
@@ -92,6 +123,20 @@ def agent_instruction(agent) -> str:
                         "task; item='candidate.py' reads only YOUR file. It starts "
                         "as the official uniform-random solver, then your writes "
                         "replace it. Other agents' files cannot be read.")
+    if "bbo_read_public_data" in assigned:
+        guidance.append("bbo_read_public_data(item='summary') gives the official "
+                        "public visible dataset schema; item='instance_0' reads "
+                        "one public instance. Use only these named selectors. "
+                        "The submitted solver receives no instance parameters.")
+    if "bbo_read_prior_feedback" in assigned:
+        guidance.append("bbo_read_prior_feedback(item='summary') reads "
+                        "the preceding completed version's public feedback "
+                        "within this run, if available.")
+    if "bbo_read_prior_trace" in assigned:
+        guidance.append("bbo_read_prior_trace(item='checkpoints') reads "
+                        "sampled PUBLIC visible best-so-far checkpoints at "
+                        "queries 20, 60 and 120, if available. The submitted "
+                        "solver never receives these latent diagnostics.")
     if "bbo_write_candidate" in assigned:
         guidance.append("bbo_write_candidate(source=...) takes complete Python "
                         "source and writes only YOUR candidate.py.")
@@ -231,6 +276,11 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
         work = output_dir / "tool_workspace"
         work.mkdir(exist_ok=True)
         (work / "instruction.md").write_text(instruction, encoding="utf-8")
+        if feedback:
+            (work / "prior_feedback.json").write_text(
+                json.dumps({key: feedback.get(key) for key in
+                            ("source_label", "summary", "public_trace")},
+                           ensure_ascii=False), encoding="utf-8")
     task = ("RSI-Exam BBO optimizer generation. The goal is to MINIMIZE noisy y. "
             "No objective oracle is available to agents. Count actual evaluations "
             "exactly once across ask/tell: increment the counter in tell or ask, "

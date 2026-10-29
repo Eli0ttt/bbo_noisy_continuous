@@ -17,7 +17,9 @@ spec = importlib.util.spec_from_file_location("candidate_contract_probe", sys.ar
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 report = {"valid": True, "cases": [], "warnings": []}
-for batches in ([1] * 120, [31, 31, 31, 27], [120], [7, 13, 17, 19, 23, 41]):
+batch_cases = (([1] * 12, [31], [7, 13, 17, 23]) if sys.argv[2:] == ["--quick"]
+               else ([1] * 120, [31, 31, 31, 27], [120], [7, 13, 17, 19, 23, 41]))
+for batches in batch_cases:
     opt = module.Optimizer(10, np.full(10, -5.0), np.full(10, 5.0), 120, 0, np.random.default_rng(0))
     seen = []
     try:
@@ -49,6 +51,73 @@ for batches in ([1] * 120, [31, 31, 31, 27], [120], [7, 13, 17, 19, 23, 41]):
 print("CONTRACT_PASS")
 print("PROBE_JSON:" + json.dumps(report))
 '''
+
+# Research-side diagnostic only. This reads the official PUBLIC visible cases
+# and uses the official selfcheck's seed, batch, validation and tell helpers.
+# It never becomes part of the submitted solver or supplies an objective tool.
+PUBLIC_TRACE_PROBE = r'''
+import json, sys
+import numpy as np
+sys.path.insert(0, "/app")
+import selfcheck as sc
+import bbo_harness
+kind = sc._load_optimizer(__import__("pathlib").Path(sys.argv[1]))
+report = []
+for idx in (0, 5, 11):
+    instance = sc.DATA["instances"][idx]
+    for seed_idx in (0, 1):
+        seed = sc._run_seed(instance, instance_index=idx, seed_index=seed_idx)
+        objective, lower, upper = bbo_harness.make_objective(instance, seed=seed)
+        lower, upper = np.asarray(lower, float), np.asarray(upper, float)
+        optimizer = kind(dim=len(lower), lower=lower, upper=upper,
+                         budget=120, seed=seed, rng=np.random.default_rng(seed))
+        best = float("inf")
+        checkpoints = []
+        observed = []
+        points = []
+        next_batch = sc._batch_hint(optimizer, remaining=120)
+        while len(observed) < 120:
+            n = min(next_batch, 120-len(observed))
+            X = sc._validate_points(optimizer.ask(n), dim=len(lower), lower=lower,
+                                    upper=upper, requested=n, remaining=120-len(observed))
+            hint = sc._batch_hint(optimizer, remaining=120-len(observed))
+            y = []
+            for x in X:
+                value = float(objective(x))
+                latent = float(bbo_harness.latent_objective(instance, x))
+                best = min(best, latent)
+                y.append(value)
+                observed.append(value)
+                points.append(tuple(x))
+                if len(observed) in (20, 60, 120):
+                    checkpoints.append(round(best, 5))
+            sc._tell(optimizer, X, np.asarray(y, float))
+            next_batch = min(hint, max(120-len(observed), 1))
+        report.append({"instance": idx, "seed_index": seed_idx,
+                       "latent_best_20_60_120": checkpoints,
+                       "unique_120": len(set(points)),
+                       "noisy_min": round(min(observed), 5)})
+print("PUBLIC_TRACE_JSON:" + json.dumps(report, separators=(",", ":")))
+'''
+
+
+def run_public_trace(remote_solver, output_dir, container):
+    """Sample public query trajectories after the full official selfcheck."""
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", container, "python", "-c",
+             PUBLIC_TRACE_PROBE, remote_solver],
+            text=True, capture_output=True, timeout=30, check=False)
+        record = next((json.loads(line.removeprefix("PUBLIC_TRACE_JSON:"))
+                       for line in proc.stdout.splitlines()
+                       if line.startswith("PUBLIC_TRACE_JSON:")), None)
+        if proc.returncode or not isinstance(record, list):
+            raise ValueError((proc.stderr or proc.stdout)[-700:])
+        (output_dir / "public_trace.json").write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        (output_dir / "public_trace_error.txt").write_text(
+            str(exc)[-900:] + "\n", encoding="utf-8")
 
 
 def run_behavior_probe(remote_solver, output_dir, container):
@@ -146,11 +215,25 @@ def evaluate_solver(solver_text, output_dir, container):
         encoding="utf-8",
     )
     if proc.returncode:
-        if "Traceback (most recent call last)" in proc.stderr and remote_solver in proc.stderr:
-            raise CandidateSelfcheckError(proc.stderr)
-        proc.check_returncode()
+        if 'File "/app/selfcheck.py"' not in proc.stderr and remote_solver not in proc.stderr:
+            # Docker/daemon failures are infrastructure errors and must stop.
+            proc.check_returncode()
+        # The official harness raises its own ValueError when an optimizer
+        # returns an out-of-bounds point. That traceback need not name the
+        # candidate file; it is still an invalid generated solver, not a
+        # broken research pipeline. Preserve the exact stdout/stderr above.
+        detail = (proc.stderr or proc.stdout)[-5000:]
+        raise CandidateSelfcheckError(
+            f"official visible selfcheck exited {proc.returncode}: {detail}"
+        )
 
-    result = parse_selfcheck_output(proc.stdout)
+    try:
+        result = parse_selfcheck_output(proc.stdout)
+    except ValueError as exc:
+        raise CandidateSelfcheckError(
+            f"official visible selfcheck emitted no score: {exc}; "
+            f"stdout={(proc.stdout or '')[-1500:]}; stderr={(proc.stderr or '')[-1500:]}"
+        ) from exc
 
     result["contract_valid"] = behavior["valid"]
     result["contract_issue"] = "" if behavior["valid"] else behavior.get("error", "")[-1500:]
@@ -160,6 +243,9 @@ def evaluate_solver(solver_text, output_dir, container):
         json.dumps(result, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+    if result["contract_valid"]:
+        run_public_trace(remote_solver, output_dir, container)
 
     return result
 
