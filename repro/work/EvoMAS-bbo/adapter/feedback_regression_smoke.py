@@ -21,7 +21,8 @@ except ImportError:
     sys.modules["smolagents"] = types.SimpleNamespace(Tool=type("Tool", (), {}))
 
 from visible_selfcheck import CONTRACT_PROBE, CandidateSelfcheckError, evaluate_solver
-from evomas_bbo_pipeline import (build_research_feedback, load_prior_memory,
+from evomas_bbo_pipeline import (build_research_feedback, write_session_lessons,
+                                 load_prior_memory,
                                  copy_initial_memory, should_restore_basic_tools,
                                  normalize_basic_pool_seeds,
                                  retarget_unavailable_models,
@@ -187,6 +188,30 @@ with tempfile.TemporaryDirectory() as temporary:
     assert feedback["source_contract_valid"]
     assert feedback["history"][0]["label"] == "parent_00"
     assert feedback["history"][0]["solver_source"] == GOOD
+    # EvoMAS can prefer a cheaper configuration; feedback must still revise
+    # the solver that the official visible-based handoff would choose.
+    weaker = evaluations / "parent_01"
+    weaker.mkdir()
+    (weaker / "candidate_solver.py").write_text(GOOD + "\n# second version\n")
+    second = {"label": "parent_01", "visible_score": 0.02,
+              "contract_valid": True,
+              "sha256": hashlib.sha256((GOOD + "\n# second version\n").encode()).hexdigest()}
+    lower_metrics = dict(metrics[0], score_anytime=0.01, score_final=0.04)
+    correct = build_research_feedback(evaluations, [records[0], second],
+                                      [metrics[0], lower_metrics], 1)
+    assert correct["source_label"] == "parent_00"
+    assert correct["solver_source"] == GOOD
+    assert "Measured public comparison" in correct["summary"]
+    assert "+0.080000" in correct["summary"]
+    ledger = write_session_lessons(root, evaluations,
+                                   [records[0], second], [metrics[0], lower_metrics])
+    assert ledger[0]["prior_best_label"] is None
+    assert ledger[1]["prior_best_label"] == "parent_00"
+    assert ledger[1]["visible_delta_to_prior_best"] == -0.08
+    assert len((root / "session_lessons.jsonl").read_text().splitlines()) == 2
+    write_session_lessons(root, evaluations, [records[0], second],
+                          [metrics[0], lower_metrics])
+    assert len((root / "session_lessons.jsonl").read_text().splitlines()) == 2
 
     (candidate / "evomas_metrics.json").write_text(json.dumps(metrics[0]))
     (root / "best_visible_solver.py").write_text(GOOD)

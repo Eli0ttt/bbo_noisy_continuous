@@ -145,7 +145,10 @@ def agent_instruction(agent) -> str:
         guidance.append("bbo_read_history(item='index') lists every completed "
                         "candidate in this run, including invalid ones. Pass an "
                         "exact listed label to read that version's solver source "
-                        "and error. These sources are research history only; a "
+                        "and error, official public selfcheck, saved agent "
+                        "report excerpts, and sampled public trace when present. "
+                        "Private reasoning is not "
+                        "available. These are research history only; a "
                         "new independent run always starts from uniform random.")
     if "bbo_write_candidate" in assigned:
         guidance.append("bbo_write_candidate(source=...) takes complete Python "

@@ -153,7 +153,15 @@ def metrics_from_bbo(result, runtime_summary, elapsed):
 
 def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
     """Public research feedback for the next MAS, never a verifier tool."""
-    best = candidates[best_index]
+    # The submitted solver is chosen by visible score.  EvoMAS's reward-best
+    # configuration can differ because its reward also prices time and tokens.
+    eligible = [i for i, candidate in enumerate(candidates)
+                if candidate.get("contract_valid", True)
+                and candidate.get("selfcheck_passed", True)
+                and candidate.get("visible_score") is not None]
+    incumbent_index = (max(eligible, key=lambda i: candidates[i]["visible_score"])
+                       if eligible else best_index)
+    best = candidates[incumbent_index]
     best_dir = evaluation_dir / best["label"]
     source = (best_dir / "candidate_solver.py").read_text(encoding="utf-8")
     if len(source) > 100_000:
@@ -173,14 +181,14 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
             f"mean_final_latent={item['mean_final_latent_objective']:.4f}; "
             f"behavior={warnings or probe.get('error', 'no warning')}; "
             f"query_diversity={uniqueness or 'unknown'}; "
-            f"error={item.get('errors', '')[-450:]}"
+            f"error={item.get('errors', '')[-250:]}"
         )
     agents = []
     for path in sorted(best_dir.glob("agent_*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
         content = str(data.get("content") or "").strip()
         agents.append(f"{data.get('agent_id')}: success={data.get('success')}; "
-                      f"report-start={content[:280]!r}; report-end={content[-280:]!r}")
+                      f"report-start={content[:160]!r}; report-end={content[-160:]!r}")
     tool_events = []
     audit_path = best_dir / "tool_audit.jsonl"
     if audit_path.exists():
@@ -208,8 +216,8 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
                "best-so-far at that query but can improve noisy decisions later; "
                "evaluate their net value rather than removing them blindly. A static preflight "
                "does not measure optimizer quality.\n"
-               + "\n".join(assessments) + "\nPrior MAS agent trajectory:\n"
-               + "\n".join(agents[:24]) + "\nPrior tool calls:\n"
+               + "\n".join(assessments) + "\nPrior MAS agent reports:\n"
+               + "\n".join(agents[:10]) + "\nPrior tool calls:\n"
                + "\n".join(tool_events))
     trace_path = best_dir / "public_trace.json"
     if trace_path.is_file():
@@ -217,6 +225,33 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
         summary += ("\nPUBLIC visible diagnostic traces for incumbent (sampled "
                     "instances and seeds; checkpoints 20, 60, 120): "
                     + json.dumps(trace, separators=(",", ":"))[:1700])
+    prior_valid = [i for i in eligible if i != incumbent_index]
+    if prior_valid:
+        comparator = max(prior_valid, key=lambda i: candidates[i]["visible_score"])
+        other = candidates[comparator]
+        own = metrics[incumbent_index]
+        old = metrics[comparator]
+        summary += ("\nMeasured public comparison with next-best valid version "
+                    f"{other['label']}: visible delta="
+                    f"{best['visible_score'] - other['visible_score']:+.6f}, "
+                    f"anytime delta={own['score_anytime'] - old['score_anytime']:+.6f}, "
+                    f"final delta={own['score_final'] - old['score_final']:+.6f}. "
+                    "These are measured outcomes, not causal proof. ")
+        other_trace = evaluation_dir / other["label"] / "public_trace.json"
+        if trace_path.is_file() and other_trace.is_file():
+            summary += ("Compare the two public 20/60/120 checkpoint traces "
+                        "for early versus late weakness: incumbent="
+                        + json.dumps(json.loads(trace_path.read_text(encoding="utf-8")),
+                                     separators=(",", ":"))[:1700]
+                        + "; comparator="
+                        + json.dumps(json.loads(other_trace.read_text(encoding="utf-8")),
+                                     separators=(",", ":"))[:1700])
+    summary += ("\nNext decision: write a testable one-change hypothesis tied "
+                "to a measured public weakness; keep an adaptive ask/tell "
+                "loop when a large batch would defer all feedback. Judge "
+                "the complete proposed solver using official visible selfcheck. "
+                "Saved agent reports and tool calls are observable artifacts; "
+                "do not invent or claim access to private model reasoning. ")
     rejected_configs = [
         f"{path.name}: {path.read_text(encoding='utf-8')[:350]}"
         for path in sorted(evaluation_dir.glob("*.fallback_reason.txt"))
@@ -228,23 +263,81 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
     history = []
     for candidate in candidates:
         path = evaluation_dir / candidate["label"] / "candidate_solver.py"
+        run = evaluation_dir / candidate["label"]
+        reports = []
+        for report_path in sorted(run.glob("agent_*.json")):
+            try:
+                record = json.loads(report_path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            reports.append({"agent": record.get("agent_id"),
+                            "success": record.get("success"),
+                            "error": str(record.get("error") or "")[-500:],
+                            "visible_report_excerpt": str(record.get("content") or "")[:1500]})
+        candidate_trace = run / "public_trace.json"
+        official_check = run / "selfcheck.json"
         history.append({
             "label": candidate["label"], "sha256": candidate["sha256"],
             "visible_score": candidate["visible_score"],
             "contract_valid": candidate["contract_valid"],
             "error": candidate.get("contract_issue", "")[-900:],
             "solver_source": path.read_text(encoding="utf-8"),
+            "agent_reports": reports[:16],
+            "official_visible_selfcheck": json.loads(official_check.read_text(encoding="utf-8"))
+                if official_check.is_file() else None,
+            "public_trace": json.loads(candidate_trace.read_text(encoding="utf-8"))
+                if candidate_trace.is_file() else None,
         })
+    report_glimpses = []
+    for entry in history:
+        reports = entry["agent_reports"]
+        if reports:
+            chosen = next((r for r in reports if r["agent"] in ("aggregator", "worker")),
+                          reports[0])
+            report_glimpses.append(
+                f"{entry['label']}/{chosen['agent']}: "
+                f"{chosen['visible_report_excerpt'][:220]!r}")
+    summary += ("\nPer-version observable report excerpts (not private reasoning): "
+                + "; ".join(report_glimpses[-16:]))
     summary += ("\nAll versions in THIS run (including invalid candidates) "
                 "are available by label via bbo_read_history(item='index') "
                 "and bbo_read_history(item='<label>'). "
                 "Inspect earlier versions when a recent change fails.")
     return {"source_label": best["label"], "source_sha256": best["sha256"],
             "source_contract_valid": bool(valid),
-            "summary": summary[:11500], "solver_source": source,
+            "summary": summary[:16000], "solver_source": source,
             "history": history,
             "public_trace": json.loads(trace_path.read_text(encoding="utf-8"))
                 if trace_path.is_file() else None}
+
+
+def write_session_lessons(output_dir, evaluation_dir, candidates, metrics):
+    """Rebuild a measured, within-session evidence ledger, including on resume."""
+    lessons = []
+    for record, item in zip(candidates, metrics):
+        previous_valid = [c for c in candidates[:len(lessons)]
+                          if c.get("contract_valid", True) and c.get("selfcheck_passed", True)
+                          and c.get("visible_score") is not None]
+        prior_best = max(previous_valid, key=lambda c: c["visible_score"]) if previous_valid else None
+        lesson = {"version": record["label"],
+                  "valid": bool(record.get("contract_valid", True)
+                                and record.get("selfcheck_passed", True)),
+                  "visible_score": record["visible_score"],
+                  "score_anytime": item.get("score_anytime"),
+                  "score_final": item.get("score_final"),
+                  "prior_best_label": prior_best["label"] if prior_best else None,
+                  "visible_delta_to_prior_best": (
+                      record["visible_score"] - prior_best["visible_score"]
+                      if prior_best and record["visible_score"] is not None else None),
+                  "error": item.get("errors", "")[-900:]}
+        trace_path = evaluation_dir / record["label"] / "public_trace.json"
+        if trace_path.is_file():
+            lesson["public_trace"] = json.loads(trace_path.read_text(encoding="utf-8"))
+        lessons.append(lesson)
+    (output_dir / "session_lessons.jsonl").write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in lessons),
+        encoding="utf-8")
+    return lessons
 
 
 def load_prior_memory(run_dir):
@@ -290,6 +383,33 @@ def sanitize_working_pool(working_pool, tool_mode):
     if not list(working_pool.glob("*.yaml")):
         raise ValueError("No valid MAS configurations remain in the working pool")
     return rejected
+
+
+def clear_inherited_pool_evidence(working_pool):
+    """Preserve evolved topology/prompts, strip prior performance metadata."""
+    import re
+    for entry in working_pool.iterdir():
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        elif entry.suffix != ".yaml" and entry.name != "provenance.json":
+            entry.unlink()  # mas_index.json, memory.json, or stray files
+        elif entry.suffix == ".yaml":
+            try:
+                config = yaml.safe_load(entry.read_text(encoding="utf-8"))
+            except yaml.YAMLError:
+                continue  # Later sanitation quarantines malformed YAML.
+            if not isinstance(config, dict):
+                continue
+            meta = config.get("meta")
+            if isinstance(meta, dict):
+                for key in ("reward", "accuracy", "total_tokens", "added_at"):
+                    meta.pop(key, None)
+            desc = config.get("description")
+            if isinstance(desc, str):
+                config["description"] = re.sub(
+                    r"\breward\s+[+-]?\d+(?:\.\d+)?\b",
+                    "prior-evolved", desc, flags=re.IGNORECASE)
+            entry.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
 
 def copy_initial_memory(source, destination):
@@ -477,6 +597,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--evomas-root", type=Path, required=True)
     parser.add_argument("--seed-pool", type=Path, required=True)
+    parser.add_argument("--pool-warm-start", action="store_true")
     parser.add_argument("--instruction", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--resume-existing", action="store_true",
@@ -500,6 +621,9 @@ def main():
     parser.add_argument("--initial-memory", type=Path, help="Optional prior EvoMAS action memory JSON")
     parser.add_argument("--continue-from-run", type=Path,
                         help="Carry only EvoMAS memory from a completed run; pool is chosen separately")
+    parser.add_argument("--knowledge-scope", choices=("session", "cross-run"),
+                        default="session",
+                        help="Default isolates independent runs; cross-run is an explicit research opt-in")
     parser.add_argument(
         "--mutation-probability",
         type=float,
@@ -528,6 +652,20 @@ def main():
         raise ValueError("Cannot continue a live run in dry-run mode")
     if args.initial_memory and args.continue_from_run:
         raise ValueError("Use either --initial-memory or --continue-from-run")
+    if args.knowledge_scope == "session" and (args.initial_memory or args.continue_from_run):
+        raise ValueError("Cross-run memory requires explicit --knowledge-scope cross-run")
+    if args.knowledge_scope == "session" and not args.resume_existing and not args.dry_run:
+        builtin = args.evomas_root.resolve().parent / "EvoMAS-bbo" / "pool"
+        allowed = {builtin / "upstream_bbeh_s2_full_basic",
+                   builtin / "upstream_bbeh_s2_full"}
+        if args.seed_pool.resolve() not in allowed and not (
+                args.pool_warm_start and args.seed_pool.name == "working_pool"):
+            raise ValueError("Session scope requires a bundled original seed pool; "
+                             "previous YAML pools require --pool-warm-start")
+    if args.pool_warm_start and args.seed_pool.name != "working_pool":
+        raise ValueError("--pool-warm-start requires a working_pool directory")
+    if args.pool_warm_start and args.resume_existing:
+        raise ValueError("Resume uses its existing pool; omit --pool-warm-start")
 
     repeat_count = 0 if args.skip_final_repeat else 1
     if args.max_steps is None:
@@ -575,6 +713,11 @@ def main():
     checkpoint_file = args.output_dir / "session_checkpoint.json"
     if args.resume_existing:
         state = json.loads(checkpoint_file.read_text(encoding="utf-8"))
+        if "knowledge_scope" not in state and args.knowledge_scope == "session":
+            raise ValueError("Legacy checkpoint has unknown knowledge scope; "
+                             "resume with --knowledge-scope cross-run if appropriate")
+        if state.get("knowledge_scope", args.knowledge_scope) != args.knowledge_scope:
+            raise ValueError("Resume knowledge scope differs from the original session")
         signature = {"meta_model": args.meta_model, "model_pool": args.model_pool,
                      "solver_limit": args.solver_limit, "seed": args.seed,
                      "mutation_probability": args.mutation_probability}
@@ -585,6 +728,8 @@ def main():
         rejected_pool_configs = state["rejected_pool_configs"]
     else:
         shutil.copytree(args.seed_pool, working_pool)
+        if args.pool_warm_start:
+            clear_inherited_pool_evidence(working_pool)
         retargeted_models = retarget_unavailable_models(working_pool, args.model_pool)
         if args.tool_mode == "bbo":
             for path in working_pool.glob("*.yaml"):
@@ -706,6 +851,8 @@ def main():
                           "solver_limit": args.solver_limit, "seed": args.seed,
                           "mutation_probability": args.mutation_probability},
             "started_epoch": time.time(), "parent_paths": parent_paths,
+            "knowledge_scope": args.knowledge_scope,
+            "pool_warm_start": args.pool_warm_start,
             "retargeted_models": retargeted_models,
             "rejected_pool_configs": rejected_pool_configs,
         }
@@ -738,6 +885,12 @@ def main():
         (args.output_dir / "candidate_manifest.json").write_text(
             json.dumps(candidates, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+        recorded_metrics = (metrics + [item] if len(candidates) > len(metrics)
+                            else metrics)
+        write_session_lessons(args.output_dir, evaluation_dir, candidates, recorded_metrics)
+
+    if args.resume_existing:
+        write_session_lessons(args.output_dir, evaluation_dir, candidates, metrics)
 
     for index, parent_path in enumerate(parent_paths):
         label = f"parent_{index:02d}"
@@ -854,13 +1007,21 @@ def main():
                 key=rewards.__getitem__,
                 reverse=True,
             )
+            # Keep the upstream crossover operator.  Its execution-log
+            # arguments carry current-session evidence to both parent slots.
+            cross_logs_1 = dict(metrics[ranked[0]])
+            cross_logs_2 = dict(metrics[ranked[1]])
+            if feedback is not None:
+                evidence = feedback["summary"][-3500:]
+                cross_logs_1["session_visible_evidence"] = evidence
+                cross_logs_2["session_visible_evidence"] = evidence
             offspring = recover_meta(f"step_{step:02d}_crossover",
                 lambda: configs[ranked[0]],
                 meta_model.crossover,
                 configs[ranked[0]],
                 configs[ranked[1]],
-                metrics[ranked[0]],
-                metrics[ranked[1]],
+                cross_logs_1,
+                cross_logs_2,
                 model_list=args.model_pool,
             )
             action = "crossover"
@@ -982,15 +1143,21 @@ def main():
         configs[best_index],
         encoding="utf-8",
     )
+    # Audit the topology that actually produced the visible-selected solver.
+    # EvoMAS's reward-best topology above can be different.
+    winning_topology = evaluation_dir / f"{visible_winner['label']}.yaml"
+    validated_config(winning_topology.read_text(encoding="utf-8"), args.tool_mode)
+    shutil.copyfile(winning_topology, args.output_dir / "best_visible_config.yaml")
 
     summary = {
         "dry_run": args.dry_run,
-        "bbo_feedback_adapter": "public_visible_previous_best_v1",
+        "bbo_feedback_adapter": "session_visible_evidence_v2",
         "behavior_probe": "synthetic_ask_tell_no_objective_v1",
         "research_wall_seconds": time.monotonic() - run_started,
         "hidden_status": "not_run",
         "hidden_score": None,
         "seed_pool": str(args.seed_pool),
+        "pool_warm_start": state.get("pool_warm_start", False),
         "meta_model": args.meta_model,
         "model_pool": args.model_pool,
         "retargeted_seed_models": retargeted_models,
@@ -1008,6 +1175,8 @@ def main():
                                  for c in candidates),
         "candidates": candidates,
         "best_visible": visible_winner,
+        "best_visible_config_sha256": hashlib.sha256(
+            (args.output_dir / "best_visible_config.yaml").read_bytes()).hexdigest(),
         "rejected_inherited_pool_configs": rejected_pool_configs,
         "meta_errors": meta_errors,
         "final_reward_best_metrics": final_metrics,
@@ -1021,6 +1190,7 @@ def main():
         ).hexdigest(),
         "accepted_pool_path": accepted,
         "memory_evolution": args.memory_evolution,
+        "knowledge_scope": args.knowledge_scope,
         "initial_memory": str(args.initial_memory) if args.initial_memory else None,
         "continuation_from": str(args.continue_from_run) if args.continue_from_run else None,
         "migrated_memory_entries": migrated_memory_entries,

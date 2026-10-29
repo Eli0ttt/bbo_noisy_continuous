@@ -12,12 +12,14 @@ if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
   shift
 fi
 if [[ ! "$VERSIONS" =~ ^[0-9]+$ ]] || (( VERSIONS < 3 )); then
-  printf 'Usage: %s [solver_versions >= 3] [previous_completed_run] [--resume-run UNFINISHED_DIR] [--meta-model MODEL] [--model-pool MODEL,MODEL] [--mutation-probability 0..1] [--research-time-limit SECONDS]\n' "$0" >&2
+  printf 'Usage: %s [solver_versions >= 3] [previous_completed_run] [--inherit-working-pool COMPLETED_DIR] [--resume-run UNFINISHED_DIR] [--knowledge-scope session|cross-run] [--meta-model MODEL] [--model-pool MODEL,MODEL] [--mutation-probability 0..1] [--research-time-limit SECONDS]\n' "$0" >&2
   exit 2
 fi
 CONTINUE_ARGS=()
+PREVIOUS_RUN=""
 SEED_POOL="repro/work/EvoMAS-bbo/pool/upstream_bbeh_s2_full_basic"
 if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
+  PREVIOUS_RUN="$1"
   test -f "$1/summary.json"
   CONTINUE_ARGS=(--continue-from-run "$1")
   # Start every run from the original, equally equipped seed MAS pool.
@@ -31,16 +33,19 @@ fi
 
 export OPENAI_API_KEY="${OPENAI_API_KEY:-${DEEPSEEK_API_KEY:-}}"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-${DEEPSEEK_BASE_URL:-}}"
-META_MODEL="${BBO_META_MODEL:-deepseek-v4-flash-s1}"
+META_MODEL="${BBO_META_MODEL:-deepseek-v4-flash-s2}"
 MODEL_POOL="${BBO_MODEL_POOL:-deepseek-v4-flash-s1,deepseek-v4-flash-s2}"
+KNOWLEDGE_SCOPE="${BBO_KNOWLEDGE_SCOPE:-session}"
 MUTATION_PROBABILITY="${BBO_MUTATION_PROBABILITY:-0.8}"
 RESEARCH_TIME_LIMIT="${BBO_RESEARCH_TIME_LIMIT:-6750}"
 export BBO_OPENAI_MAX_RETRIES="${BBO_OPENAI_MAX_RETRIES:-1}"
 export BBO_OPENAI_TIMEOUT="${BBO_OPENAI_TIMEOUT:-120}"
 RESUME_RUN=""
+POOL_WARM_START_RUN=""
+POOL_WARM_START_ARGS=()
 while (( $# )); do
   case "$1" in
-    --meta-model|--model-pool|--mutation-probability|--research-time-limit|--resume-run)
+    --meta-model|--model-pool|--mutation-probability|--research-time-limit|--resume-run|--knowledge-scope|--inherit-working-pool)
       if (( $# < 2 )); then printf 'Missing value for %s\n' "$1" >&2; exit 2; fi
       case "$1" in
         --meta-model) META_MODEL="$2" ;;
@@ -48,11 +53,30 @@ while (( $# )); do
         --mutation-probability) MUTATION_PROBABILITY="$2" ;;
         --research-time-limit) RESEARCH_TIME_LIMIT="$2" ;;
         --resume-run) RESUME_RUN="$2" ;;
+        --knowledge-scope) KNOWLEDGE_SCOPE="$2" ;;
+        --inherit-working-pool) POOL_WARM_START_RUN="$2" ;;
       esac
       shift 2 ;;
     *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
+if [[ "$KNOWLEDGE_SCOPE" != session && "$KNOWLEDGE_SCOPE" != cross-run ]]; then
+  printf 'Invalid knowledge scope: %s\n' "$KNOWLEDGE_SCOPE" >&2; exit 2
+fi
+if [[ -n "$PREVIOUS_RUN" && "$KNOWLEDGE_SCOPE" != cross-run ]]; then
+  printf 'Prior run is not allowed in session scope; use --knowledge-scope cross-run explicitly.\n' >&2
+  exit 2
+fi
+if [[ -n "$POOL_WARM_START_RUN" ]]; then
+  if [[ -n "$PREVIOUS_RUN" || -n "$RESUME_RUN" ]]; then
+    printf 'Pool-only inheritance cannot be combined with previous-run memory or resume.\n' >&2
+    exit 2
+  fi
+  test -f "$POOL_WARM_START_RUN/summary.json"
+  test -d "$POOL_WARM_START_RUN/working_pool"
+  SEED_POOL="$POOL_WARM_START_RUN/working_pool"
+  POOL_WARM_START_ARGS=(--pool-warm-start)
+fi
 RESUME_ARGS=()
 if [[ -n "$RESUME_RUN" ]]; then
   test -f "$RESUME_RUN/session_checkpoint.json"
@@ -83,6 +107,7 @@ if [[ "${BBO_RUN_HIDDEN:-1}" == 1 ]]; then
 fi
 python repro/work/EvoMAS-bbo/adapter/feedback_regression_smoke.py
 python repro/work/EvoMAS-bbo/adapter/session_recovery_smoke.py
+python repro/work/EvoMAS-bbo/adapter/pool_warm_start_smoke.py
 python repro/work/EvoMAS-bbo/adapter/tool_contract_smoke.py
 
 OUT="${RESUME_RUN:-$PWD/repro/work/EvoMAS-bbo/outputs/live_tools_feedback_$(date -u +%Y%m%d_%H%M%S)}"
@@ -91,11 +116,12 @@ if [[ "${BBO_RUN_HIDDEN:-1}" == 1 ]]; then
                --hidden-jobs-dir "$OUT/harbor_jobs")
 fi
 printf 'RUN_DIR=%s\n' "$OUT"
-printf 'META_MODEL=%s MODEL_POOL=%s MUTATION_PROBABILITY=%s VERSIONS=%s RESEARCH_TIME_LIMIT=%s\n' \
-  "$META_MODEL" "$MODEL_POOL" "$MUTATION_PROBABILITY" "$VERSIONS" "$RESEARCH_TIME_LIMIT"
+printf 'META_MODEL=%s MODEL_POOL=%s MUTATION_PROBABILITY=%s VERSIONS=%s RESEARCH_TIME_LIMIT=%s KNOWLEDGE_SCOPE=%s\n' \
+  "$META_MODEL" "$MODEL_POOL" "$MUTATION_PROBABILITY" "$VERSIONS" "$RESEARCH_TIME_LIMIT" "$KNOWLEDGE_SCOPE"
 python repro/work/EvoMAS-bbo/adapter/evomas_bbo_pipeline.py \
   --evomas-root repro/work/EvoMAS-openai \
   --seed-pool "$SEED_POOL" \
+  "${POOL_WARM_START_ARGS[@]}" \
   --instruction instruction.md \
   --output-dir "$OUT" \
   "${RESUME_ARGS[@]}" \
@@ -106,6 +132,7 @@ python repro/work/EvoMAS-bbo/adapter/evomas_bbo_pipeline.py \
   --max-solver-versions "$VERSIONS" \
   --mutation-probability "$MUTATION_PROBABILITY" \
   --research-time-limit "$RESEARCH_TIME_LIMIT" \
+  --knowledge-scope "$KNOWLEDGE_SCOPE" \
   --skip-final-repeat \
   --tool-mode bbo \
   --memory-evolution \

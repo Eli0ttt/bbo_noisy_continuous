@@ -65,6 +65,11 @@ def run_one(out: Path, interrupt_label: str, partial: bool):
             pipeline.main()
     summary = json.loads((out / "summary.json").read_text())
     assert len(summary["candidates"]) == 5
+    lessons = [json.loads(line) for line in
+               (out / "session_lessons.jsonl").read_text().splitlines()]
+    assert len(lessons) == 5
+    assert summary["knowledge_scope"] == "session"
+    assert (out / "best_visible_config.yaml").is_file()
     if partial:
         assert summary["candidates"][2]["contract_valid"] is False
         assert (out / "evaluations" / "step_01_mutation" /
@@ -74,6 +79,15 @@ def run_one(out: Path, interrupt_label: str, partial: bool):
 
 with tempfile.TemporaryDirectory() as temporary:
     base = Path(temporary)
+    with patch.object(sys, "argv", args(base / "rejected") +
+                      ["--initial-memory", str(base / "old-memory.json")]):
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                pipeline.main()
+        except ValueError as exc:
+            assert "Cross-run memory" in str(exc)
+        else:
+            raise AssertionError("default session scope accepted earlier memory")
     run_one(base / "after_parent", "parent_01", False)
     run_one(base / "during_child", "step_01", True)
 print("PASS: same-session resume preserves completed and failed candidates")
