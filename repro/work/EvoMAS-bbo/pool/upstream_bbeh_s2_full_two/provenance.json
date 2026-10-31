@@ -1,0 +1,17 @@
+{
+  "configs": {
+    "majority_vote.yaml": {
+      "adapted_sha256": "48757f7559cf882298600419a56eadeb21e9e580946eac2622da1b33a645ffd1",
+      "agent_count": 7,
+      "upstream_sha256": "6addefa32a5adf7d61812170d875f13aa7904ab04ae11fd31e75e54358d918ca"
+    },
+    "smoa.yaml": {
+      "adapted_sha256": "5214d94da1c7efa17ecec8b414b0a1a174863990c412c5a2bc4faaeb0d9b0f5f",
+      "agent_count": 11,
+      "upstream_sha256": "8326083c34ae1dc92c7e657ab5e965377ca3aade71c659bba477832222f5acef"
+    }
+  },
+  "model": "openai:deepseek-v4-flash-s2",
+  "seed_tool_policy": "basic",
+  "source": "repro/upstream/EvoMAS/mas_pools/bbeh"
+}
