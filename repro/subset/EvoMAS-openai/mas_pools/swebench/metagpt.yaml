@@ -1,0 +1,69 @@
+name: metagpt_swebench
+description: MetaGPT-style SOP pipeline (Product Manager → Architect → Project Manager → Engineer → QA Engineer) for SWE-bench tasks
+backend: smolagents
+agents:
+  # Role 1: Product Manager - analyzes the issue, creates PRD
+  product_manager:
+    id: product_manager
+    role: product_manager
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: metagpt_product_manager
+    tools: []
+    max_tokens: 4096
+    temperature: 0.3
+    device: null
+  # Role 2: Architect - designs the technical fix strategy
+  architect:
+    id: architect
+    role: architect
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: metagpt_architect
+    tools: []
+    max_tokens: 4096
+    temperature: 0.3
+    device: null
+  # Role 3: Project Manager - breaks down into implementation tasks
+  project_manager:
+    id: project_manager
+    role: project_manager
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: metagpt_project_manager
+    tools: []
+    max_tokens: 4096
+    temperature: 0.3
+    device: null
+  # Role 4: Engineer - implements the actual fix (DefaultAgent/swe-agent for repo interaction)
+  engineer:
+    id: engineer
+    role: engineer
+    agent_type: SWEAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: worker
+    tools: []
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  # Role 5: QA Engineer - reviews the fix and provides quality assessment
+  qa_engineer:
+    id: qa_engineer
+    role: qa_engineer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: metagpt_qa_engineer
+    tools: []
+    max_tokens: 4096
+    temperature: 0.3
+    device: null
+topology:
+  reports_to:
+    product_manager: [architect]
+    architect: [project_manager]
+    project_manager: [engineer]
+    engineer: [qa_engineer]
+execution:
+  parallel_workers: false
+  timeout: 900
+  max_retries: 0
