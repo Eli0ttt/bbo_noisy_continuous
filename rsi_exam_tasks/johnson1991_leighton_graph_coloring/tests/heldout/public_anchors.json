@@ -1,0 +1,64 @@
+{
+  "data_split": "public",
+  "floor_anchor": {
+    "description": "Conflicts from a single reference TabuCol (the shipped baseline gc_lib.reference_tabucol) at target_k, run for a FIXED per-instance iteration budget (data field ref_max_iters, calibrated to ~30-35s and safely under the 45s cap). Machine-independent. Reward 0 = matching this standard local search.",
+    "name": "reference_tabucol_fixed_iters",
+    "per_instance": [
+      {
+        "conflicts": 31,
+        "name": "pub0"
+      },
+      {
+        "conflicts": 9,
+        "name": "pub1"
+      },
+      {
+        "conflicts": 21,
+        "name": "pub2"
+      },
+      {
+        "conflicts": 63,
+        "name": "pub3"
+      },
+      {
+        "conflicts": 5,
+        "name": "pub4"
+      }
+    ],
+    "total_conflicts": 129
+  },
+  "kpi_definition": "per-instance KPI = conflicts (monochromatic edges at target_k); reported kpi = total conflicts over the set",
+  "per_instance_cap_secs": 45.0,
+  "revision": "realcolor_v5",
+  "score_direction": "min",
+  "score_formula": "per-instance s_j = clip((floor_conf_j - conflicts_j)/(floor_conf_j - 0),0,1) = clip(1 - conf/floor). metric = monochromatic edges at target_k (= best-known chi). floor = reference TabuCol at the cap, best = 0 (a proper coloring provably exists at target_k).",
+  "scoring_floor": "floor_anchor",
+  "sota_anchor": {
+    "description": "0 conflicts: a proper target_k-coloring provably exists (target_k = published best-known chromatic number). EXTERNAL, unbeatable target \u2014 reward 1.",
+    "name": "proper_coloring_zero_conflicts",
+    "per_instance": [
+      {
+        "conflicts": 0,
+        "name": "pub0"
+      },
+      {
+        "conflicts": 0,
+        "name": "pub1"
+      },
+      {
+        "conflicts": 0,
+        "name": "pub2"
+      },
+      {
+        "conflicts": 0,
+        "name": "pub3"
+      },
+      {
+        "conflicts": 0,
+        "name": "pub4"
+      }
+    ],
+    "total_conflicts": 0
+  },
+  "task_id": "johnson1991_leighton_graph_coloring"
+}

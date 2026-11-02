@@ -1,0 +1,14 @@
+{
+ "name": "color_d7",
+ "family": "color_code:superdense_color_code_X",
+ "style": "superdense_color_code_X",
+ "distance": 7,
+ "rounds": 7,
+ "n_dev": 10000,
+ "n_eval": 50000,
+ "decode_budget_sec": 900,
+ "n_detectors": 252,
+ "n_observables": 1,
+ "ler_base": 0.1358,
+ "ler_sota": 0.00872
+}

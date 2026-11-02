@@ -1,0 +1,14 @@
+{
+ "name": "color_d5",
+ "family": "color_code:superdense_color_code_X",
+ "style": "superdense_color_code_X",
+ "distance": 5,
+ "rounds": 5,
+ "n_dev": 20000,
+ "n_eval": 100000,
+ "decode_budget_sec": 600,
+ "n_detectors": 90,
+ "n_observables": 1,
+ "ler_base": 0.07361,
+ "ler_sota": 0.01869
+}
