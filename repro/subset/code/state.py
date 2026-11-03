@@ -11,7 +11,7 @@ BBO=['bbo_read_context','bbo_read_public_data','bbo_read_prior_feedback',
      'bbo_read_prior_trace','bbo_read_history','bbo_write_candidate',
      'bbo_preflight_candidate','bbo_probe_candidate']
 SUBSET=['subset_read_context','subset_read_public','subset_read_history',
-        'subset_write_candidate','subset_preflight']
+        'subset_write_candidate','subset_preflight','subset_public_python']
 TO_BBO=dict(zip(SUBSET,[BBO[0],BBO[1],BBO[4],BBO[5],BBO[6]]))
 TO_SUBSET={x:SUBSET[0] for x in BBO[:1]}
 TO_SUBSET.update({BBO[1]:SUBSET[1],BBO[2]:SUBSET[2],BBO[3]:SUBSET[2],
@@ -21,12 +21,18 @@ def atom(path,obj):
  path=Path(path);tmp=path.with_suffix(path.suffix+'.tmp')
  tmp.write_text(json.dumps(obj,ensure_ascii=False,indent=2)+'\n',encoding='utf8');os.replace(tmp,path)
 
-def adapt(text,task):
+def adapt(text,task,source_task=None):
  c=yaml.safe_load(text)
  if not isinstance(c,dict) or not isinstance(c.get('agents'),dict):raise ValueError('Invalid MAS YAML')
  mapping=TO_BBO if task=='bbo' else TO_SUBSET
  allowed=set(BBO if task=='bbo' else SUBSET)
  for a in c['agents'].values():
+  if source_task in TASKS and source_task!=task:
+   # Carry the MAS roles/topology/model knowledge, but not another task's solver instructions.
+   role=str(a.get('role') or a.get('id') or 'worker')[:80]
+   a['prompt']=(f'Act as {role} on the CURRENT RSI-Exam task. Follow its official '
+                'instruction, cooperate through this MAS topology, and produce a '
+                'valid task-specific solver. Do not reuse a previous task solver.')
   tools=[]
   for t in a.get('tools',[]):
    mapped=mapping.get(t,t)
@@ -55,7 +61,8 @@ def export(state,task,dest):
  manifest=json.loads((state/'manifest.json').read_text())
  dest.mkdir(parents=True);(dest/'working_pool').mkdir()
  for p in sorted((state/'pool').glob('*.yaml')):
-  (dest/'working_pool'/p.name).write_text(adapt(p.read_text(),task),encoding='utf8')
+  source_task=next((name for name in TASKS if p.stem.startswith('evolved_'+name+'_')),None)
+  (dest/'working_pool'/p.name).write_text(adapt(p.read_text(),task,source_task),encoding='utf8')
  atom(dest/'memory.json',memory)
  atom(dest/'manifest.json',{'schema':manifest['schema'],
   'runs':[{'task':x['task'],'config_sha256':x['config_sha256']} for x in manifest['runs']]})

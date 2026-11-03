@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import threading
 from pathlib import Path
 from smolagents import Tool
@@ -12,7 +13,8 @@ CATALOG = {
  'subset_read_public': 'Read a bounded schema and counts of official public data only.',
  'subset_read_history': 'Read current research session candidate feedback by exact label.',
  'subset_write_candidate': 'Write complete Python source to your own candidate.py.',
- 'subset_preflight': 'Check your written candidate against this task interface and import allow-list.'}
+ 'subset_preflight': 'Check your written candidate against this task interface and import allow-list.',
+ 'subset_public_python': 'Run a short Python experiment in this task\'s public, network-isolated Docker image; imports follow that task image, not the research host.'}
 CATALOG_TEXT = 'Task generation tools; any subset may be assigned in evolved YAML:\n' + '\n'.join(
  f'- {k}: {v}' for k,v in CATALOG.items())
 LOCK=threading.Lock()
@@ -95,6 +97,32 @@ class Preflight(Base):
   except Exception as exc:
    self.record(False);return f'FAIL: {type(exc).__name__}: {exc}'
 
-FACTORIES={x.name:x for x in (ReadContext,ReadPublic,ReadHistory,WriteCandidate,Preflight)}
+class PublicPython(Base):
+ name='subset_public_python';description=CATALOG[name]
+ inputs={'source':{'type':'string','description':'Python snippet up to 12000 characters using only this task\'s public image; print the result'}}
+ def forward(self,source:str)->str:
+  if not isinstance(source,str) or not source.strip() or len(source)>12000:
+   self.record(False);return 'DENIED: nonempty source must be at most 12000 characters'
+  images={'inventory':'bbo_simopt_inventory',
+          'graph':'johnson1991_leighton_graph_coloring','qec':'qec_decoder_arena'}
+  if self.task not in images:
+   self.record(False);return 'DENIED: unknown task'
+  cmd=['docker','run','--rm','-i','--network','none','--read-only',
+       '--security-opt','no-new-privileges','--tmpfs','/tmp:rw,nosuid,size=256m',
+       '--cpus','2','--memory','4g','--pids-limit','128',
+       '-e','PYTHONDONTWRITEBYTECODE=1','--workdir',
+       '/app/methods/main' if self.task=='graph' else '/app',
+       'rsi-subset-'+images[self.task]+':public','python','-']
+  try:
+   run=subprocess.run(cmd,input=source,text=True,capture_output=True,timeout=35)
+   output=(run.stdout+'\n'+run.stderr)[-12000:]
+   self.record(run.returncode==0)
+   return f'PUBLIC_IMAGE_EXIT={run.returncode}\n{output}'
+  except subprocess.TimeoutExpired:
+   self.record(False);return 'PUBLIC_IMAGE_TIMEOUT: 35 seconds'
+  except OSError as exc:
+   self.record(False);return f'PUBLIC_IMAGE_ERROR: {type(exc).__name__}: {exc}'
+
+FACTORIES={x.name:x for x in (ReadContext,ReadPublic,ReadHistory,WriteCandidate,Preflight,PublicPython)}
 def make_tool(name,root,agent,task_root,task):
  return FACTORIES[name](root,agent,task_root,task)

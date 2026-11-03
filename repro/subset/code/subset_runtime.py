@@ -11,7 +11,7 @@ from subset_visible import static_gate
 
 MODELS={'openai:deepseek-v4-flash-s1','openai:deepseek-v4-flash-s2'}
 TOOLS={'subset_read_context','subset_read_public','subset_read_history',
-       'subset_write_candidate','subset_preflight'}
+       'subset_write_candidate','subset_preflight','subset_public_python'}
 
 def validate_yaml(source):
  from src.mas.spec import MasSpec
@@ -54,9 +54,9 @@ def extract(source,task):
  raise ValueError('No complete candidate for this task in terminal report')
 
 def role_hint(agent,task):
- output={'inventory':'Optimizer with __init__(dim, lower, upper, budget, seed, rng), ask(n), tell(X,y,metadata=None), 4D [0,1]^4, 48 noisy costs; stdlib + NumPy 2.2.6 only, self-contained solver.py.',
-         'graph':'solve(data) returning {"colorings": [[int,...], ...]}; fixed target_k, fewer monochromatic edges, each graph <45 seconds; stdlib + NumPy, optional official gc_lib.',
-         'qec':'decode(setting,dets) returning a boolean [n_shots,n_observables] array; per-setting decode limit 600/900s; stdlib + NumPy + SciPy + Stim + PyMatching only; dev labels allowed, eval truth withheld.'}[task]
+ output={'inventory':'Treat space-filling probes and a regime-diverse initial policy portfolio as hypotheses; compare independent progress across the four public regimes; target robust per-case improvements within 48 queries. Optimizer with __init__(dim, lower, upper, budget, seed, rng), ask(n), tell(X,y,metadata=None), 4D [0,1]^4, 48 noisy costs; stdlib + NumPy 2.2.6 only, self-contained solver.py.',
+         'graph':'Consider incremental neighbor-color counts, adaptive tabu/ILS and robust restarts; verify them on the public graphs. Always return n_vertices color entries for EVERY graph; a fallback must be a valid coloring even when a search/helper times out or returns an empty list. Use monotonic per-instance timing; finish each graph in at most 35s including setup and formatting to avoid the 45s kill. solve(data) returning {"colorings": [[int,...], ...]}; fixed target_k, fewer monochromatic edges, each graph <45 seconds; stdlib + NumPy, optional official gc_lib.',
+         'qec':'Investigate correlation-aware decoding or color-pair schemes using labeled development data as testable hypotheses, without memorizing public labels. Check all four visible settings, including d7 and d9; preserve shape and per-setting budget. decode(setting,dets) returning a boolean [n_shots,n_observables] array; per-setting decode limit 600/900s; stdlib + NumPy + SciPy + Stim + PyMatching only; dev labels allowed, eval truth withheld.'}[task]
  prompt=agent.prompt if agent.prompt not in ('worker','smoa_aggregator','aggregator','judge','team_worker','processor','debater_initial','debater_round','reviewer_create','reviewer_review','reviewer_revise') else ''
  return ('This is the RSI-Exam '+task+' task. Produce a complete solver.py, not a fixed answer. '
          +output+' Preserve official interface and generalize to sealed cases. '
@@ -64,9 +64,16 @@ def role_hint(agent,task):
          'subset_read_context(item="instruction.md" or "candidate.py"); '
          'subset_read_public(item="summary"); subset_read_history(item="index" or label); '
          'subset_write_candidate(source=complete_code); subset_preflight(item="candidate.py") '
-         'after writing. Interpreter restrictions: do not use open/exec/importlib there; '
-         'put solver code inside a string tool argument or fenced final answer. '
-         'Use earlier reports from EvoMAS DAG context, not other agents\' scratch files. '
+         'after writing. '
+         + ('For executable experiments with task-allowed imports, call '
+            'subset_public_python(source=Python_text) in the public task image. '
+            if 'subset_public_python' in agent.tools else
+            'subset_public_python is not assigned to this role; do not call it. ')
+         + 'The CodeAgent host interpreter is for small pure computations; never run filesystem operations there. '
+         'The CodeAgent host interpreter is for small pure computations; never run filesystem operations there. '
+         'After a prior candidate exists in THIS task run, use subset_read_history(item="index" or label) '
+         'to inspect its public result and source, then make a specific solver improvement; '
+         'do not use a solver from a previous task or previous run. '
          + ('Evolved prompt guidance: '+prompt if prompt else ''))
 
 def execute(config_path,task_root,task,output_dir,history,dry_run=False):
@@ -113,7 +120,10 @@ def execute(config_path,task_root,task,output_dir,history,dry_run=False):
  try:final,metadata=runtime_mod.MasRuntime(spec).run(prompt)
  finally:runtime_mod._get_runner_class=old
  (output_dir/'aggregator_response.txt').write_text(final)
- if failures or final.startswith('Error:'):raise RuntimeError(f'MAS failed: {str(failures)[:700]}')
+ if failures:
+  (output_dir/'agent_failures.json').write_text(json.dumps(failures,ensure_ascii=False,indent=2))
+ if any(x['agent']==terminal for x in failures):
+  raise RuntimeError(f'Terminal agent failed: {str(failures)[:700]}')
  try:source=extract(final,task);origin='terminal_report'
  except ValueError:
   # Accept only terminal's own file after an audited successful write.
@@ -127,6 +137,7 @@ def execute(config_path,task_root,task,output_dir,history,dry_run=False):
  target.write_text(source,encoding='utf8')
  result={'metadata':metadata,'candidate_sha256':hashlib.sha256(target.read_bytes()).hexdigest(),
          'source':origin,'terminal':terminal,
+         'agent_failures':failures,
          'configured_tools':{k:list(v.tools) for k,v in spec.agents.items()}}
  (output_dir/'mas_summary.json').write_text(json.dumps(result,indent=2,default=str))
  return result

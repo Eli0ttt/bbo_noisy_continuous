@@ -51,6 +51,23 @@ def main():
  result=json.loads(files[0].read_text());value=((result.get('verifier_result') or {}).get('rewards') or {}).get('reward')
  if not isinstance(value,(int,float)):raise RuntimeError('No numeric official reward; inspect '+str(files[0]))
  s['hidden_status']='completed';s['hidden_score']=float(value)
+ # The official metric and the platform's mapped reward are distinct for some tasks.
+ metric_names={'bbo':('oracle_normalized_auc70_final30','higher'),
+               'inventory':('mean_log_cost_progress_auc70_final30','higher'),
+               'graph':('total_conflicts','lower'),
+               'qec':('mean_setting_score','higher')}
+ label,direction=metric_names[a.task]
+ metric=None
+ diagnostic=files[0].parent/'verifier'/('score_details.json' if a.task=='qec' else 'grade_debug.json')
+ if diagnostic.is_file():
+  try:
+   detail=json.loads(diagnostic.read_text())
+   metric=detail.get('metric') if a.task in ('qec','graph') else detail.get('reward')
+  except (OSError,ValueError):pass
+ s['final_result']={'official_metric_name':label,'official_metric_direction':direction,
+                    'official_metric':metric,'platform_reward':float(value),
+                    'diagnostic_path':str(diagnostic) if diagnostic.is_file() else None}
  summary.write_text(json.dumps(s,indent=2,ensure_ascii=False)+'\n')
- print(json.dumps({'task':a.task,'hidden_score':value,'job':str(job),'source_sha256':digest}))
+ print(json.dumps({'task':a.task,'final_result':s['final_result'],
+                   'job':str(job),'source_sha256':digest}))
 if __name__=='__main__':main()

@@ -5,6 +5,7 @@ Runner for smolagents framework.
 import logging
 import re
 import subprocess
+import sys
 from typing import Any, Dict, Optional
 from pathlib import Path
 
@@ -325,7 +326,7 @@ class SmolagentsRunner(BaseAgentRunner):
                             spec.id,
                         )
                     elif tool_spec in {"subset_read_context", "subset_read_public", "subset_read_history",
-                                       "subset_write_candidate", "subset_preflight"}:
+                                       "subset_write_candidate", "subset_preflight", "subset_public_python"}:
                         from src.tools.subset_generation import make_tool
                         root = getattr(self, "subset_tool_root", None)
                         if root is None:
@@ -352,12 +353,23 @@ class SmolagentsRunner(BaseAgentRunner):
                             f"for agent {spec.id}; refusing silent ignore"
                         )
 
-            # Create agent with model
+            # Only the active public task may add its officially shipped modules.
+            public_task = getattr(self, "subset_task_name", None)
+            authorized = ["json", "numpy", "numpy.random", "numpy.linalg", "math", "statistics"]
+            if public_task == "qec":
+                authorized += ["scipy", "stim", "pymatching"]
+            elif public_task == "graph":
+                methods = Path(self.subset_task_root) / "environment/methods/main"
+                if str(methods) not in sys.path:
+                    sys.path.insert(0, str(methods))
+                authorized += ["gc_lib"]
+            budget = 50 if public_task == "qec" else 45
+            logger.info("CodeAgent task=%s max_steps=%s imports=%s", public_task or "bbo", budget, authorized)
             agent = agent_class(
                 tools=tools_to_use,
                 model=model.smolagents_model,
-                max_steps=30,
-                additional_authorized_imports=["src.models", "src.tools", "src.data_generation", "json", "numpy", "numpy.random", "numpy.linalg", "math", "statistics"]
+                max_steps=budget,
+                additional_authorized_imports=authorized
             )
 
             # Build full prompt with context

@@ -20,7 +20,7 @@ from subset_visible import NAMES, evaluate, static_gate
 
 MODELS=['openai:deepseek-v4-flash-s1','openai:deepseek-v4-flash-s2']
 TOOLS=['subset_read_context','subset_read_public','subset_read_history',
-       'subset_write_candidate','subset_preflight']
+       'subset_write_candidate','subset_preflight','subset_public_python']
 
 def seed_yaml(text):
  config=yaml.safe_load(text)
@@ -243,6 +243,9 @@ def main():
           'completed_versions':len(candidates),'operations':operations,
           'working_pool':str(pool),'rejected_inherited_pool_configs':rejected,
           'research_seconds':time.monotonic()-started,'meta_model':MODELS[0],
+          'agent_max_steps':50 if a.task=='qec' else 45,
+          'model_request_timeout_sec':float(os.environ.get('BBO_OPENAI_TIMEOUT','120')),
+          'model_request_retries':int(os.environ.get('BBO_OPENAI_MAX_RETRIES','1')),
           'model_pool':MODELS,'seed':a.seed,'max_versions':a.max_versions,
           'mutation_probability':a.mutation_probability,
           'starter_sha256':hashlib.sha256((a.task_root/'environment/methods/main/solver.py').read_bytes()).hexdigest(),

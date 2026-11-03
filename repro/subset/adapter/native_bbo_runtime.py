@@ -389,8 +389,11 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
         runtime_module._get_runner_class = original_factory
     # Write the raw final output before parsing so malformed/novel formats remain diagnosable.
     (output_dir / "aggregator_response.txt").write_text(final, encoding="utf-8")
-    if failures or final.startswith("Error:"):
-        raise MASExecutionFailure(f"Agent failed; errors={failures}, final={final[:200]}")
+    if failures:
+        (output_dir / "agent_failures.json").write_text(
+            json.dumps(failures, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if any(item["agent"] == terminal_agent for item in failures):
+        raise MASExecutionFailure(f"Terminal agent failed; errors={failures}")
     try:
         candidate = extract_candidate(final)
         candidate_source = "final_report"
@@ -419,6 +422,7 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
                "research_feedback_sha256": feedback["source_sha256"] if feedback else None,
                "configured_tools": {aid: list(a.tools) for aid, a in spec.agents.items()},
                "models": {aid: a.model_id for aid, a in spec.agents.items()},
+               "agent_failures": failures,
                "candidate_sha256": hashlib.sha256(candidate.encode()).hexdigest(),
                "candidate_source": candidate_source,
                "metadata": metadata, "calls": calls}
