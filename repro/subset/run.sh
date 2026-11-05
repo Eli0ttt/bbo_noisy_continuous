@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "${1:?Usage: run.sh ROOT STATE TASK MODE SEED}" && pwd)"
 STATE="$(realpath "${2:?STATE}")"; TASK="${3:?TASK}"; MODE="${4:?MODE}"; SEED="${5:?SEED}"
 [[ "$TASK" =~ ^(bbo|inventory|graph|qec)$ ]] || exit 2
-[[ "$MODE" =~ ^(original|joint|parallel)$ ]] || exit 2
+[[ "$MODE" == original ]] || exit 2
 [[ "$SEED" =~ ^[0-9]+$ ]] || exit 2
 cd "$ROOT"
 set -a

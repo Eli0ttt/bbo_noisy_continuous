@@ -481,7 +481,11 @@ execution:
             "execution_logs": str(execution_logs),
             "accuracy": execution_logs.get('accuracy', 'N/A'),
             "errors": execution_logs.get('errors', 'None'),
-            "observations": observations,
+            "observations": observations + (
+                "\nBefore the complete YAML, briefly state observed evidence, suspected "
+                "root cause, the ONE chosen component, intended edit, and predicted "
+                "public effect. Do not invent measurements. Put the complete YAML "
+                "in one fenced yaml block."),
             "model_constraint": model_constraint
         }
 
@@ -514,6 +518,15 @@ execution:
                 response = str(response)
 
             logger.info(f"Received response ({len(response)} chars)")
+
+            # Keep the model's declared rationale separate from verified outcomes.
+            decision_path = getattr(self, "mutation_decision_path", None)
+            if decision_path:
+                import json
+                rationale = response.split("```yaml", 1)[0][:2000]
+                with Path(decision_path).open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"declared_rationale": rationale},
+                                            ensure_ascii=False) + "\n")
 
             # Extract YAML from response
             mutated_config = extract_yaml_from_response(response)

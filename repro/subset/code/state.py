@@ -62,6 +62,7 @@ def export(state,task,dest):
  dest.mkdir(parents=True);(dest/'working_pool').mkdir()
  for p in sorted((state/'pool').glob('*.yaml')):
   source_task=next((name for name in TASKS if p.stem.startswith('evolved_'+name+'_')),None)
+  if p.name not in ('majority_vote.yaml','smoa.yaml') and source_task != task:continue
   (dest/'working_pool'/p.name).write_text(adapt(p.read_text(),task,source_task),encoding='utf8')
  atom(dest/'memory.json',memory)
  atom(dest/'manifest.json',{'schema':manifest['schema'],
@@ -128,7 +129,21 @@ def commit(root,state,run):
   raw=yaml.safe_dump(cfg,sort_keys=False,allow_unicode=True)
   out=state/'pool'/f'evolved_{task}_{digest[:12]}.yaml'
   if out.exists() and out.read_text()!=raw:raise RuntimeError('Pool hash collision')
-  out.write_text(raw,encoding='utf8')
+  # Persist only a distinct, validated improvement over the two parent MASs.
+  parent_texts=[(run/'evaluations'/f'parent_{i:02d}.yaml').read_text(encoding='utf8')
+                for i in range(2) if (run/'evaluations'/f'parent_{i:02d}.yaml').is_file()]
+  if task=='bbo':
+   # The BBO pipeline validates the executable MAS before writing best_config.
+   if not isinstance(yaml.safe_load(raw),dict):raise ValueError('Invalid BBO MAS')
+  else:
+   sys.path.insert(0,str(root/'repro/subset/EvoMAS-openai'))
+   sys.path.insert(0,str(root/'repro/subset/code'))
+   from subset_runtime import validate_yaml
+   validate_yaml(raw)
+  improved=any(op.get('improved') for op in s.get('operations',[]))
+  distinct=all(yaml.safe_load(config.read_text(encoding='utf8')) != yaml.safe_load(x)
+               for x in parent_texts)
+  if improved and distinct:out.write_text(raw,encoding='utf8')
   memory=json.loads((state/'memory.json').read_text())
   candidates=s.get('candidates',[])
   def score(c):return c.get('visible',{}).get('metric') if task!='bbo' else c.get('visible_score')
@@ -158,7 +173,7 @@ def main():
   if cmd=='export':sp.add_argument('--task',choices=TASKS,required=True);sp.add_argument('--dest',type=Path,required=True)
   if cmd=='commit':sp.add_argument('--run',type=Path,required=True)
   if cmd=='merge':
-   sp.add_argument('--mode',choices=('original','joint','parallel'),required=True)
+   sp.add_argument('--mode',choices=('original',),required=True)
    sp.add_argument('--seed',type=int,required=True)
  a=p.parse_args();root=a.root.resolve();state=a.state.resolve()
  if a.command=='init':initialize(root,state)

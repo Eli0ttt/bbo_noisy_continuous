@@ -70,7 +70,6 @@ def role_hint(agent,task):
             if 'subset_public_python' in agent.tools else
             'subset_public_python is not assigned to this role; do not call it. ')
          + 'The CodeAgent host interpreter is for small pure computations; never run filesystem operations there. '
-         'The CodeAgent host interpreter is for small pure computations; never run filesystem operations there. '
          'After a prior candidate exists in THIS task run, use subset_read_history(item="index" or label) '
          'to inspect its public result and source, then make a specific solver improvement; '
          'do not use a solver from a previous task or previous run. '

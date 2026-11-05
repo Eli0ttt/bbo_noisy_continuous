@@ -515,6 +515,14 @@ execution:
 
             logger.info(f"Received response ({len(response)} chars)")
 
+            decision_path = getattr(self, "mutation_decision_path", None)
+            if decision_path:
+                import json
+                rationale = response.split("```yaml", 1)[0][:2000]
+                with Path(decision_path).open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"declared_rationale": rationale},
+                                            ensure_ascii=False) + "\n")
+
             # Extract YAML from response
             mutated_config = extract_yaml_from_response(response)
 

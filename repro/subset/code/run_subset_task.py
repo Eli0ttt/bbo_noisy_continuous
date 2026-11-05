@@ -60,7 +60,7 @@ def main():
  p.add_argument('--output-dir',type=Path,required=True)
  p.add_argument('--carry-from',type=Path,help='Legacy one-run transfer; use frozen state snapshots for formal runs')
  p.add_argument('--initial-memory',type=Path,help='Frozen persistent memory snapshot')
- p.add_argument('--mutation-mode',choices=['original','joint','parallel'],default='original')
+ p.add_argument('--mutation-mode',choices=['original'],default='original')
  p.add_argument('--seed',type=int,default=43)
  p.add_argument('--max-versions',type=int,default=6)
  p.add_argument('--mutation-probability',type=float,default=.7)
@@ -89,12 +89,12 @@ def main():
  from src.meta_model.reward import compute_reward
  from src.meta_model.pool import ConfigurationPool,add_to_pool_if_better
  from src.tools.subset_generation import CATALOG_TEXT
- from mutation_ablation import install
  from subset_runtime import validate_yaml,execute
- install(MetaModel)
  os.environ['EVOMAS_ALLOWED_MODELS']=' '.join(MODELS)
  initial_names=[];rejected=[]
  for path in sorted(a.seed_pool.glob('*.yaml')):
+  if path.stem not in ('majority_vote','smoa') and not path.stem.startswith(f'evolved_{a.task}_'):
+   continue
   text=(seed_yaml(path.read_text(encoding='utf8')) if path.stem in ('majority_vote','smoa')
         else inherited_yaml(path.read_text(encoding='utf8')))
   validate_yaml(text)
@@ -103,7 +103,7 @@ def main():
  if len(initial_names)!=2:raise ValueError('Exactly majority_vote and smoa must exist in initial seed pool')
  if a.carry_from:
   for path in sorted((a.carry_from/'working_pool').glob('*.yaml')):
-   if path.name in initial_names:continue
+   if path.name in initial_names or not path.stem.startswith(f'evolved_{a.task}_'):continue
    try:
     text=inherited_yaml(path.read_text(encoding='utf8'))
     validate_yaml(text)
@@ -131,8 +131,7 @@ def main():
   meta=MetaModel(model_id=MODELS[0],memory_path=str(a.output_dir/'memory.json'),
                  memory_evolution=True)
   meta.bbo_tool_policy=CATALOG_TEXT+'\nFor this task, keep only tools from this catalog.'
-  meta.mutation_mode=a.mutation_mode
-  meta.mutation_trace_path=a.output_dir/'mutation_trace.jsonl'
+  meta.mutation_decision_path=a.output_dir/'mutation_rationales.jsonl'
  task_query=f'RSI-Exam {NAMES[a.task]}: '+(a.task_root/'instruction.md').read_text()[:250]
  task_description=(a.task_root/'instruction.md').read_text()[:9000]
  def valid_or_parent(proposed,parent,label):
@@ -141,9 +140,13 @@ def main():
    (a.output_dir/f'{label}.rejected.yaml').write_text(str(proposed))
    (a.output_dir/f'{label}.rejected_reason.txt').write_text(str(exc))
    return parent
+ # Select from this task's pool; use the two seeds on selection failure.
+ fallback=[str(pool/n) for n in initial_names]
  try:parents=meta.select(task_query,task_description,str(pool),k=2)
- except Exception:parents=[str(pool/n) for n in initial_names]
- if len(set(map(str,parents)))!=2:parents=[str(pool/n) for n in initial_names]
+ except Exception:parents=fallback
+ if (len(parents)!=2 or len(set(map(str,parents)))!=2 or
+     any(Path(x).resolve().parent!=pool.resolve() or not Path(x).is_file() for x in parents)):
+  parents=fallback
  # Provenance: only two parent MAS configurations; no previous solver source.
  selected_paths=[Path(x) for x in parents]
  for path in selected_paths:
@@ -192,7 +195,14 @@ def main():
   use_mutation=len(configs)<2 or rng.random()<a.mutation_probability
   action='mutation' if use_mutation else 'crossover'
   label=f'step_{step:02d}_{action}'
-  feedback=json.dumps(history[-6:],ensure_ascii=False)[-14000:]
+  evidence=[{'label':h['label'],'public_metric':h['metric'],'valid':h['valid'],
+             'error':h['error'],'source_sha256':candidates[i]['sha256']}
+            for i,h in enumerate(history[-6:],start=max(0,len(history)-6))]
+  prior=a.output_dir/'decision_evidence.jsonl'
+  prior_rows=[json.loads(x) for x in prior.read_text().splitlines()[-4:]] if prior.is_file() else []
+  feedback=json.dumps({'observations':evidence,'prior_decisions':prior_rows},ensure_ascii=False,default=str)[-14000:]
+  reason_path=a.output_dir/'mutation_rationales.jsonl'
+  reason_count=len(reason_path.read_text().splitlines()) if reason_path.is_file() else 0
   try:
    if use_mutation: proposed=meta.mutate(configs[best],metrics[best],feedback,model_list=MODELS)
    else:
@@ -201,20 +211,39 @@ def main():
                             metrics[ranked[1]],model_list=MODELS)
   except Exception:proposed=configs[best]
   config=valid_or_parent(proposed,configs[best],label)
+  before=yaml.safe_load(configs[best]);after=yaml.safe_load(config)
+  changed=[field for field in ('prompt','model_id','tools') if any(
+    before['agents'].get(k,{}).get(field)!=after['agents'].get(k,{}).get(field)
+    for k in set(before['agents'])|set(after['agents']))]
+  if before.get('topology')!=after.get('topology') or set(before['agents'])!=set(after['agents']):
+   changed.append('topology')
+  if use_mutation and len(changed)!=1:
+   (a.output_dir/f'{label}.rejected_reason.txt').write_text(
+    f'Original mutation must change exactly one component; observed {changed}')
+   config=configs[best];changed=[]
   child=evaluate_one(label,config)
   new_reward=compute_reward(child,beta=1e-6,cost_weight='both')
   operations.append({'label':label,'action':action,'parent_reward':rewards[best],
-                     'reward':new_reward,'improved':new_reward>rewards[best]})
+                     'reward':new_reward,'improved':new_reward>rewards[best],
+                     'changed_components':changed,'effective_change':bool(changed)})
+  declared=None
+  if use_mutation and reason_path.is_file():
+   reason_rows=reason_path.read_text().splitlines()
+   if len(reason_rows)>reason_count:
+    declared=json.loads(reason_rows[-1]).get('declared_rationale')
+  with (a.output_dir/'decision_evidence.jsonl').open('a') as f:
+   f.write(json.dumps({'label':label,'model_declared_rationale':declared,'action':action,'selected_parent':candidates[best]['label'],
+    'parent_public':metrics[best]['visible_result'],'observations':evidence,
+    'changed_components':changed,
+    'child_public':child['visible_result'],'reward_delta':new_reward-rewards[best],
+    'effective_change':bool(changed)},ensure_ascii=False,default=str)+'\n')
   # The whole task is consolidated once by state.py after public and hidden evaluation.
-  if use_mutation and a.mutation_mode!='original' and not a.dry_run:
-   with (a.output_dir/'mutation_trace.jsonl').open('a') as f:
-    f.write(json.dumps({'event':'outcome','label':label,'visible_score':child['visible_result'].get('metric'),
-       'parent_visible_score':metrics[best]['visible_result'].get('metric'),
-       'improved_reward':new_reward>rewards[best]})+'\n')
  rewards=[compute_reward(m,beta=1e-6,cost_weight='both') for m in metrics]
  best_config=max(range(len(rewards)),key=rewards.__getitem__)
  (a.output_dir/'best_reward_config.yaml').write_text(configs[best_config],encoding='utf8')
- if metrics[best_config]['visible_result']['valid']:
+ if (metrics[best_config]['visible_result']['valid'] and
+     configs[best_config] not in configs[:len(selected_paths)] and
+     rewards[best_config]>max(rewards[:len(selected_paths)])):
   pool_manager=ConfigurationPool(str(pool))
   accepted=add_to_pool_if_better(pool_manager,configs[best_config],metrics[best_config],
       metrics[:min(2,len(selected_paths))],task_query,beta=1e-6,cost_weight='both',threshold=.05)

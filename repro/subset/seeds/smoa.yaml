@@ -1,6 +1,6 @@
-name: smoa_bbeh
-description: DAG-unrolled SMoA (multi-layer processors with judge selection) for BBEH
-  tasks
+name: smoa_compact
+description: Two specialized proposals, selection, two focused revisions, selection
+  and synthesis
 backend: smolagents
 agents:
   proc_l1_1:
@@ -8,7 +8,9 @@ agents:
     role: processor
     agent_type: CodeAgent
     model_id: openai:deepseek-v4-flash-s2
-    prompt: processor
+    prompt: For the CURRENT task, propose a complete solver emphasizing simple adaptive
+      search and predictable runtime. Ground design in the official interface and
+      public observations.
     tools:
     - bbo_read_context
     - bbo_read_public_data
@@ -19,18 +21,15 @@ agents:
     - bbo_preflight_candidate
     - bbo_probe_candidate
     max_tokens: 4096
-    temperature: 0.7
+    temperature: 0.6
     device: null
-    metadata:
-      layer: 1
-      role_description: You are a logical reasoner who excels at breaking down complex
-        problems step-by-step and identifying patterns.
   proc_l1_2:
     id: proc_l1_2
     role: processor
     agent_type: CodeAgent
     model_id: openai:deepseek-v4-flash-s2
-    prompt: processor
+    prompt: For the CURRENT task, propose a distinct complete solver emphasizing noise
+      handling, diverse candidate generation, and robustness across public regimes.
     tools:
     - bbo_read_context
     - bbo_read_public_data
@@ -43,60 +42,14 @@ agents:
     max_tokens: 4096
     temperature: 0.7
     device: null
-    metadata:
-      layer: 1
-      role_description: You are a creative thinker who approaches problems from unconventional
-        angles and explores alternative solutions.
-  proc_l1_3:
-    id: proc_l1_3
-    role: processor
-    agent_type: CodeAgent
-    model_id: openai:deepseek-v4-flash-s2
-    prompt: processor
-    tools:
-    - bbo_read_context
-    - bbo_read_public_data
-    - bbo_read_prior_feedback
-    - bbo_read_prior_trace
-    - bbo_read_history
-    - bbo_write_candidate
-    - bbo_preflight_candidate
-    - bbo_probe_candidate
-    max_tokens: 4096
-    temperature: 0.7
-    device: null
-    metadata:
-      layer: 1
-      role_description: You are a detail-oriented analyst who focuses on precision,
-        edge cases, and thorough verification.
-  proc_l1_4:
-    id: proc_l1_4
-    role: processor
-    agent_type: CodeAgent
-    model_id: openai:deepseek-v4-flash-s2
-    prompt: processor
-    tools:
-    - bbo_read_context
-    - bbo_read_public_data
-    - bbo_read_prior_feedback
-    - bbo_read_prior_trace
-    - bbo_read_history
-    - bbo_write_candidate
-    - bbo_preflight_candidate
-    - bbo_probe_candidate
-    max_tokens: 4096
-    temperature: 0.7
-    device: null
-    metadata:
-      layer: 1
-      role_description: You are a pragmatic problem-solver who prioritizes efficient
-        and practical solutions.
   judge_l1:
     id: judge_l1
     role: judge
     agent_type: CodeAgent
     model_id: openai:deepseek-v4-flash-s2
-    prompt: judge
+    prompt: Compare the two task-specific proposals using the official interface and
+      public feedback. Select a promising direction and name its strongest failure
+      risk for the next layer.
     tools:
     - bbo_read_context
     - bbo_read_public_data
@@ -107,14 +60,15 @@ agents:
     - bbo_preflight_candidate
     - bbo_probe_candidate
     max_tokens: 2048
-    temperature: 0.3
+    temperature: 0.2
     device: null
   proc_l2_1:
     id: proc_l2_1
     role: processor
     agent_type: CodeAgent
     model_id: openai:deepseek-v4-flash-s2
-    prompt: processor
+    prompt: Improve the selected direction by fixing its most concrete algorithmic
+      weakness. Return a complete solver proposal, not only advice.
     tools:
     - bbo_read_context
     - bbo_read_public_data
@@ -125,18 +79,16 @@ agents:
     - bbo_preflight_candidate
     - bbo_probe_candidate
     max_tokens: 4096
-    temperature: 0.7
+    temperature: 0.45
     device: null
-    metadata:
-      layer: 2
-      role_description: You are a logical reasoner who excels at breaking down complex
-        problems step-by-step and identifying patterns.
   proc_l2_2:
     id: proc_l2_2
     role: processor
     agent_type: CodeAgent
     model_id: openai:deepseek-v4-flash-s2
-    prompt: processor
+    prompt: Challenge the selected direction on bounds, shape, timing, dependency
+      rules, and noisy feedback. Return a complete repaired or alternative solver
+      proposal.
     tools:
     - bbo_read_context
     - bbo_read_public_data
@@ -147,62 +99,15 @@ agents:
     - bbo_preflight_candidate
     - bbo_probe_candidate
     max_tokens: 4096
-    temperature: 0.7
+    temperature: 0.35
     device: null
-    metadata:
-      layer: 2
-      role_description: You are a creative thinker who approaches problems from unconventional
-        angles and explores alternative solutions.
-  proc_l2_3:
-    id: proc_l2_3
-    role: processor
-    agent_type: CodeAgent
-    model_id: openai:deepseek-v4-flash-s2
-    prompt: processor
-    tools:
-    - bbo_read_context
-    - bbo_read_public_data
-    - bbo_read_prior_feedback
-    - bbo_read_prior_trace
-    - bbo_read_history
-    - bbo_write_candidate
-    - bbo_preflight_candidate
-    - bbo_probe_candidate
-    max_tokens: 4096
-    temperature: 0.7
-    device: null
-    metadata:
-      layer: 2
-      role_description: You are a detail-oriented analyst who focuses on precision,
-        edge cases, and thorough verification.
-  proc_l2_4:
-    id: proc_l2_4
-    role: processor
-    agent_type: CodeAgent
-    model_id: openai:deepseek-v4-flash-s2
-    prompt: processor
-    tools:
-    - bbo_read_context
-    - bbo_read_public_data
-    - bbo_read_prior_feedback
-    - bbo_read_prior_trace
-    - bbo_read_history
-    - bbo_write_candidate
-    - bbo_preflight_candidate
-    - bbo_probe_candidate
-    max_tokens: 4096
-    temperature: 0.7
-    device: null
-    metadata:
-      layer: 2
-      role_description: You are a pragmatic problem-solver who prioritizes efficient
-        and practical solutions.
   judge_l2:
     id: judge_l2
     role: judge
     agent_type: CodeAgent
     model_id: openai:deepseek-v4-flash-s2
-    prompt: judge
+    prompt: Compare the two revised complete solvers against public evidence and official
+      constraints. Select the stronger candidate and document residual risks.
     tools:
     - bbo_read_context
     - bbo_read_public_data
@@ -213,14 +118,16 @@ agents:
     - bbo_preflight_candidate
     - bbo_probe_candidate
     max_tokens: 2048
-    temperature: 0.3
+    temperature: 0.2
     device: null
   aggregator:
     id: aggregator
     role: aggregator
     agent_type: CodeAgent
     model_id: openai:deepseek-v4-flash-s2
-    prompt: smoa_aggregator
+    prompt: Using the selected revision, return one complete self-contained solver.py
+      for the CURRENT task. Preserve only supported imports and verify interface,
+      finite outputs, and time budget.
     tools:
     - bbo_read_context
     - bbo_read_public_data
@@ -231,7 +138,7 @@ agents:
     - bbo_preflight_candidate
     - bbo_probe_candidate
     max_tokens: 4096
-    temperature: 0.7
+    temperature: 0.2
     device: null
 topology:
   reports_to:
@@ -239,22 +146,12 @@ topology:
     - judge_l1
     proc_l1_2:
     - judge_l1
-    proc_l1_3:
-    - judge_l1
-    proc_l1_4:
-    - judge_l1
     judge_l1:
     - proc_l2_1
     - proc_l2_2
-    - proc_l2_3
-    - proc_l2_4
     proc_l2_1:
     - judge_l2
     proc_l2_2:
-    - judge_l2
-    proc_l2_3:
-    - judge_l2
-    proc_l2_4:
     - judge_l2
     judge_l2:
     - aggregator

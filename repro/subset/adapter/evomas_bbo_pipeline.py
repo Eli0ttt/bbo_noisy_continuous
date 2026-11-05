@@ -219,6 +219,10 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
                + "\n".join(assessments) + "\nPrior MAS agent reports:\n"
                + "\n".join(agents[:10]) + "\nPrior tool calls:\n"
                + "\n".join(tool_events))
+    decision_path = evaluation_dir.parent / "mutation_trace.jsonl"
+    if decision_path.is_file():
+        recent = [json.loads(line) for line in decision_path.read_text().splitlines()[-4:]]
+        summary += "\nPrior mutation decisions and public outcomes: " + json.dumps(recent)[:4500]
     trace_path = best_dir / "public_trace.json"
     if trace_path.is_file():
         trace = json.loads(trace_path.read_text(encoding="utf-8"))
@@ -616,7 +620,7 @@ def main():
     parser.add_argument("--solver-limit", "--max-solver-versions", dest="solver_limit", type=int, default=12)
     parser.add_argument("--research-time-limit", type=float, default=None,
                         help="Optional research-only soft wall-time target; default is no artificial limit")
-    parser.add_argument("--mutation-mode", choices=("original", "joint", "parallel"),
+    parser.add_argument("--mutation-mode", choices=("original",),
                         default="original")
     parser.add_argument("--tool-mode", choices=("none", "bbo"), default="none")
     parser.add_argument("--seed", type=int, default=42)
@@ -706,8 +710,6 @@ def main():
     from src.meta_model.experience import consolidate_evolution_trace
     from src.meta_model.mas_index import MASIndex
     from src.meta_model.metamodel import MetaModel
-    from mutation_ablation import install as install_mutation_ablation
-    install_mutation_ablation(MetaModel)
     from src.meta_model.pool import ConfigurationPool, add_to_pool_if_better
     from src.meta_model.reward import compute_reward
     from src.tools.bbo_generation import CATALOG_TEXT
@@ -764,6 +766,7 @@ def main():
         "supports more distinct public-feedback iterations. Inspect per-stage "
         "PUBLIC traces before making one controlled change: tell the solver only "
         "the noisy observations, separate observed and latent diagnostics, and "
+        "never assign an observed loss at X to an unevaluated interpolated point. "
         "compare 20/60/120-query checkpoints. Do not assume the public instances' "
         "optima or coefficients are available in sealed runs. Consider centered "
         "bounded designs, covariance adaptation, local trust regions or lightweight "
@@ -792,8 +795,7 @@ def main():
             memory_evolution=args.memory_evolution,
             verbose=True,
         )
-        meta_model.mutation_mode = args.mutation_mode
-        meta_model.mutation_trace_path = args.output_dir / "mutation_trace.jsonl"
+        meta_model.mutation_decision_path = args.output_dir / "mutation_rationales.jsonl"
         meta_model.bbo_tool_policy = (
             "For the BBO no-tool baseline keep tools: [] on every agent."
             if args.tool_mode == "none" else CATALOG_TEXT
@@ -803,6 +805,9 @@ def main():
             "instructions directly in each changed YAML prompt field. Merely "
             "renaming a template identifier does not express an actionable "
             "instruction to the agent. Preserve the other component types."
+            " Before the complete YAML, state observed public evidence, suspected root cause, "
+            "the ONE chosen component, intended edit and predicted public effect. "
+            "Do not invent measurements; place complete YAML in one fenced yaml block."
         )
 
     meta_error_file = args.output_dir / "meta_errors.json"
@@ -824,12 +829,17 @@ def main():
     if args.resume_existing:
         parent_paths = state["parent_paths"]
     else:
-        parent_paths = recover_meta("select",
-            lambda: [str(p) for p in sorted(working_pool.glob("*.yaml"))[:args.num_parents]],
-            meta_model.select,
-            task_query, task_description, str(working_pool),
-            k=args.num_parents, mas_index=mas_index,
-        )
+        fallback = [str(working_pool / name) for name in
+                    ("majority_vote.yaml", "smoa.yaml")]
+        if args.num_parents != 2 or not all(Path(p).is_file() for p in fallback):
+            raise ValueError("Two seed configurations are required")
+        parent_paths = recover_meta("select", lambda: fallback,
+            meta_model.select, task_query, task_description, str(working_pool),
+            k=args.num_parents, mas_index=mas_index)
+        if (len(parent_paths) != 2 or len(set(map(str, parent_paths))) != 2 or
+                any(Path(p).resolve().parent != working_pool.resolve() or
+                    not Path(p).is_file() for p in parent_paths)):
+            parent_paths = fallback
     if not parent_paths:
         raise RuntimeError("EvoMAS selection returned no parents")
 
@@ -1001,6 +1011,8 @@ def main():
                                "improved": best_index == len(rewards) - 1})
             continue
 
+        rationale_path = args.output_dir / "mutation_rationales.jsonl"
+        rationale_count = len(rationale_path.read_text().splitlines()) if rationale_path.is_file() else 0
         if use_mutation:
             offspring = recover_meta(f"step_{step:02d}_mutation",
                 lambda: configs[best_index],
@@ -1040,6 +1052,18 @@ def main():
             if args.tool_mode == "bbo":
                 offspring = ensure_session_history_tool(offspring)
             validated_config(offspring, args.tool_mode)
+            if action == "mutation":
+                old_cfg = yaml.safe_load(configs[old_index])
+                new_cfg = yaml.safe_load(offspring)
+                changed = [field for field in ("prompt", "model_id", "tools")
+                           if any(old_cfg["agents"].get(k, {}).get(field) !=
+                                  new_cfg["agents"].get(k, {}).get(field)
+                                  for k in set(old_cfg["agents"]) | set(new_cfg["agents"]))]
+                if (old_cfg.get("topology") != new_cfg.get("topology") or
+                        set(old_cfg["agents"]) != set(new_cfg["agents"])):
+                    changed.append("topology")
+                if len(changed) != 1:
+                    raise ValueError(f"Mutation must change one component; got {changed}")
         except (ValueError, TypeError, KeyError, yaml.YAMLError) as exc:
             label = f"step_{step:02d}_{action}"
             (evaluation_dir / f"{label}.rejected.yaml").write_text(str(offspring), encoding="utf-8")
@@ -1078,7 +1102,11 @@ def main():
                 trace_out.write(json.dumps({"event": "outcome", "step": step,
                     "visible_score": child_metrics.get("bbo_score"),
                     "previous_visible_score": metrics[old_index].get("bbo_score"),
-                    "improved_reward": best_index == len(rewards) - 1}) + "\n")
+                    "improved_reward": best_index == len(rewards) - 1,
+                    "declared_rationale": (
+                        json.loads((args.output_dir / "mutation_rationales.jsonl").read_text().splitlines()[-1]).get("declared_rationale")
+                        if rationale_path.is_file() and
+                        len(rationale_path.read_text().splitlines()) > rationale_count else None)}) + "\n")
 
         recover_meta(f"step_{step:02d}_memory",
             lambda: None, meta_model.update_memory,
