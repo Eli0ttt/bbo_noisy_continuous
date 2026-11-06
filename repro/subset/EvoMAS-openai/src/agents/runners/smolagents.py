@@ -388,7 +388,8 @@ class SmolagentsRunner(BaseAgentRunner):
             if context and context.get('reports'):
                 full_prompt += "\n\nContext from other agents:\n"
                 for agent_id, report in context['reports'].items():
-                    full_prompt += f"\n--- {agent_id} ---\n{report}\n"
+                    excerpt = str(report)[:7000]
+                    full_prompt += f"\n--- {agent_id} ---\n{excerpt}\n"
 
             # Use agent.run() method (NOT direct model call)
             logger.info(f"Running {spec.agent_type} {spec.id} with model {spec.model_id}")

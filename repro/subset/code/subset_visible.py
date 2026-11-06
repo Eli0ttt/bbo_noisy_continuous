@@ -38,6 +38,11 @@ def static_gate(task, source):
         required=['data'] if task=='graph' else ['setting','dets']
         if fn is None or [x.arg for x in fn.args.args][:len(required)] != required:
             raise ValueError(f'{name}{tuple(required)} entrypoint missing')
+    if task=='inventory':
+        for node in ast.walk(tree):
+            if (isinstance(node,ast.Attribute) and node.attr in ('erf','math') and
+                isinstance(node.value,ast.Name) and node.value.id in ('np','numpy')):
+                raise ValueError('NumPy 2.2.6 has no np.erf/np.math; use stdlib math.erf or a tested approximation')
     for node in ast.walk(tree):
         names=[]
         if isinstance(node,ast.Import): names=[a.name for a in node.names]

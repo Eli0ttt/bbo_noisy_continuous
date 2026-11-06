@@ -60,7 +60,7 @@ def main():
  p.add_argument('--output-dir',type=Path,required=True)
  p.add_argument('--carry-from',type=Path,help='Legacy one-run transfer; use frozen state snapshots for formal runs')
  p.add_argument('--initial-memory',type=Path,help='Frozen persistent memory snapshot')
- p.add_argument('--mutation-mode',choices=['original'],default='original')
+ p.add_argument('--mutation-mode',choices=['original','multi'],default='original')
  p.add_argument('--seed',type=int,default=43)
  p.add_argument('--max-versions',type=int,default=6)
  p.add_argument('--mutation-probability',type=float,default=.7)
@@ -124,6 +124,7 @@ def main():
    def select(self,*args,**kwargs):return [str(pool/n) for n in initial_names]
    def generate(self,path,*args,**kw):return Path(path).read_text()
    def mutate(self,config,*args,**kw):return config
+   def mutate_multi(self,config,*args,**kw):return config
    def crossover(self,c1,*args,**kw):return c1
    def update_memory(self,**kw):pass
   meta=Fake()
@@ -132,6 +133,7 @@ def main():
                  memory_evolution=True)
   meta.bbo_tool_policy=CATALOG_TEXT+'\nFor this task, keep only tools from this catalog.'
   meta.mutation_decision_path=a.output_dir/'mutation_rationales.jsonl'
+  meta.multi_trace_path=a.output_dir/'multi_trace.jsonl'
  task_query=f'RSI-Exam {NAMES[a.task]}: '+(a.task_root/'instruction.md').read_text()[:250]
  task_description=(a.task_root/'instruction.md').read_text()[:9000]
  def valid_or_parent(proposed,parent,label):
@@ -152,14 +154,29 @@ def main():
  for path in selected_paths:
   if path.parent.resolve()!=pool.resolve():raise ValueError('Parent outside current task pool')
  configs=[];metrics=[];candidates=[];history=[];operations=[]
- def evaluate_one(label,config):
+ def evaluate_one(label,config,invalid_reason=None):
   version=a.output_dir/'evaluations'/label;version.mkdir(parents=True)
   (a.output_dir/'evaluations'/f'{label}.yaml').write_text(config)
   t0=time.monotonic();runtime={};result={}
   try:
+   if invalid_reason is not None:
+    raise ValueError('MAS configuration rejected before execution: '+invalid_reason)
    runtime=execute(a.output_dir/'evaluations'/f'{label}.yaml',a.task_root,a.task,
                    version,history,dry_run=a.dry_run)
    solver=version/'candidate_solver.py'
+   if not a.dry_run:
+    try:static_gate(a.task,solver.read_text(encoding='utf8'))
+    except (SyntaxError,ValueError) as gate_error:
+     failed_source=solver.read_text(encoding='utf8')
+     (version/'rejected_candidate.py').write_text(failed_source,encoding='utf8')
+     repair_history=history+[{'label':label+'_syntax_repair','metric':None,'valid':False,
+      'error':f'Correct this candidate before public selfcheck: {type(gate_error).__name__}: {gate_error}',
+      'source':failed_source[:100000]}]
+     runtime=execute(a.output_dir/'evaluations'/f'{label}.yaml',a.task_root,a.task,
+                     version,repair_history,dry_run=False)
+     solver=version/'candidate_solver.py'
+     static_gate(a.task,solver.read_text(encoding='utf8'))
+     (version/'syntax_repair_success.txt').write_text(str(gate_error)[:500])
    result=({'valid':True,'metric':0.01,'raw_conflicts':100} if a.dry_run else
            evaluate(a.task,a.task_root,solver))
   except Exception as exc:
@@ -179,7 +196,7 @@ def main():
           'total_tokens':tokens,'visible_result':result}
   configs.append(config);metrics.append(metric)
   history.append({'label':label,'metric':result.get('metric'),'valid':result['valid'],
-                  'error':result.get('error'),'source':solver.read_text(encoding='utf8')[:100000]})
+                  'error':result.get('error'),'source':solver.read_text(encoding='utf8')[:16000]})
   (a.output_dir/'candidate_manifest.json').write_text(json.dumps(candidates,ensure_ascii=False,indent=2))
   return metric
  for i,path in enumerate(selected_paths):
@@ -200,11 +217,17 @@ def main():
             for i,h in enumerate(history[-6:],start=max(0,len(history)-6))]
   prior=a.output_dir/'decision_evidence.jsonl'
   prior_rows=[json.loads(x) for x in prior.read_text().splitlines()[-4:]] if prior.is_file() else []
-  feedback=json.dumps({'observations':evidence,'prior_decisions':prior_rows},ensure_ascii=False,default=str)[-14000:]
+  concise=[{'label':x['label'],'action':x['action'],
+            'hypothesis':(x.get('model_decision') or {}).get('root_cause_hypothesis'),
+            'intended_change':(x.get('model_decision') or {}).get('intended_change'),
+            'changed_components':x.get('changed_components'),
+            'parent_public':x.get('parent_public'),'child_public':x.get('child_public'),
+            'insight':x.get('insight')} for x in prior_rows]
+  feedback=json.dumps({'observations':evidence,'prior_decisions':concise},ensure_ascii=False,default=str)[-14000:]
   reason_path=a.output_dir/'mutation_rationales.jsonl'
   reason_count=len(reason_path.read_text().splitlines()) if reason_path.is_file() else 0
   try:
-   if use_mutation: proposed=meta.mutate(configs[best],metrics[best],feedback,model_list=MODELS)
+   if use_mutation: proposed=(meta.mutate_multi if a.mutation_mode=='multi' else meta.mutate)(configs[best],metrics[best],feedback,model_list=MODELS)
    else:
     ranked=sorted(range(len(rewards)),key=rewards.__getitem__,reverse=True)
     proposed=meta.crossover(configs[ranked[0]],configs[ranked[1]],metrics[ranked[0]],
@@ -217,26 +240,73 @@ def main():
     for k in set(before['agents'])|set(after['agents']))]
   if before.get('topology')!=after.get('topology') or set(before['agents'])!=set(after['agents']):
    changed.append('topology')
-  if use_mutation and len(changed)!=1:
+  needs_repair=(use_mutation and len(changed)!=1) or (
+   (a.output_dir/f'{label}.rejected_reason.txt').is_file())
+  invalid_reason=None
+  if needs_repair and not a.dry_run:
+   reason=(a.output_dir/f'{label}.rejected_reason.txt')
+   explanation=reason.read_text()[:500] if reason.is_file() else f'Mutation changed {changed}, expected one component'
+   if use_mutation and getattr(meta,'last_mutation_validation_error',None):
+    explanation+='; parser detail: '+meta.last_mutation_validation_error[:500]
+   repair_prompt=(feedback+'\nPrevious YAML draft was rejected before any MAS execution: '+explanation+
+                  '\nReturn one complete valid YAML changing exactly one component type.')
+   try:
+    if use_mutation: repaired=(meta.mutate_multi if a.mutation_mode=='multi' else meta.mutate)(configs[best],metrics[best],repair_prompt,model_list=MODELS)
+    else:
+     left=dict(metrics[ranked[0]],repair_instruction=repair_prompt)
+     right=dict(metrics[ranked[1]],repair_instruction=repair_prompt)
+     repaired=meta.crossover(configs[ranked[0]],configs[ranked[1]],left,right,model_list=MODELS)
+    validate_yaml(repaired)
+    repaired_before=yaml.safe_load(configs[best]);repaired_after=yaml.safe_load(repaired)
+    repaired_changed=[field for field in ('prompt','model_id','tools') if any(
+     repaired_before['agents'].get(k,{}).get(field)!=repaired_after['agents'].get(k,{}).get(field)
+     for k in set(repaired_before['agents'])|set(repaired_after['agents']))]
+    if repaired_before.get('topology')!=repaired_after.get('topology') or set(repaired_before['agents'])!=set(repaired_after['agents']):
+     repaired_changed.append('topology')
+    if use_mutation and len(repaired_changed)!=1:raise ValueError(f'Repair changed {repaired_changed}, expected one component')
+    config=repaired;changed=repaired_changed
+    (a.output_dir/f'{label}.repair_success.txt').write_text(explanation)
+   except Exception as exc:
+    reason.write_text(explanation+'\nRepair failed: '+str(exc)[:500])
+    invalid_reason=reason.read_text()[:1000]
+    config=configs[best];changed=[]
+  elif use_mutation and len(changed)!=1:
    (a.output_dir/f'{label}.rejected_reason.txt').write_text(
     f'Original mutation must change exactly one component; observed {changed}')
+   invalid_reason=f'Original mutation must change exactly one component; observed {changed}'
    config=configs[best];changed=[]
-  child=evaluate_one(label,config)
+  child=evaluate_one(label,config,invalid_reason=invalid_reason)
   new_reward=compute_reward(child,beta=1e-6,cost_weight='both')
   operations.append({'label':label,'action':action,'parent_reward':rewards[best],
                      'reward':new_reward,'improved':new_reward>rewards[best],
                      'changed_components':changed,'effective_change':bool(changed)})
-  declared=None
+  declared=None;decision=None
   if use_mutation and reason_path.is_file():
    reason_rows=reason_path.read_text().splitlines()
    if len(reason_rows)>reason_count:
-    declared=json.loads(reason_rows[-1]).get('declared_rationale')
+    recorded=json.loads(reason_rows[-1]);declared=recorded.get('declared_rationale')
+    decision=recorded.get('decision')
+  parent_public=metrics[best]['visible_result'];child_public=child['visible_result']
+  parent_score=score_for_reward(a.task,parent_public)
+  child_score=score_for_reward(a.task,child_public)
+  actual=('invalid' if not child_public['valid'] else
+          'increase' if child_score>parent_score+1e-9 else
+          'decrease' if child_score<parent_score-1e-9 else 'same')
+  predicted=decision.get('predicted_direction') if isinstance(decision,dict) else None
+  verdict=(actual==predicted if predicted in ('increase','decrease','same')
+           and actual!='invalid' else None)
+  insight=('No effective MAS change; rerun variation is not causal evidence.' if not changed else
+           'Public evaluation invalid; repair the failure before judging the hypothesis.' if actual=='invalid' else
+           'Public score improved; hypothesis remains provisional.' if actual=='increase' else
+           'Public score declined or tied; revise the hypothesis before repeating this edit.')
   with (a.output_dir/'decision_evidence.jsonl').open('a') as f:
-   f.write(json.dumps({'label':label,'model_declared_rationale':declared,'action':action,'selected_parent':candidates[best]['label'],
+   f.write(json.dumps({'label':label,'model_declared_rationale':declared,'model_decision':decision,
+    'action':action,'selected_parent':candidates[best]['label'],
     'parent_public':metrics[best]['visible_result'],'observations':evidence,
     'changed_components':changed,
     'child_public':child['visible_result'],'reward_delta':new_reward-rewards[best],
-    'effective_change':bool(changed)},ensure_ascii=False,default=str)+'\n')
+    'effective_change':bool(changed),'actual_direction':actual,'prediction_met':verdict,
+    'insight':insight},ensure_ascii=False,default=str)+'\n')
   # The whole task is consolidated once by state.py after public and hidden evaluation.
  rewards=[compute_reward(m,beta=1e-6,cost_weight='both') for m in metrics]
  best_config=max(range(len(rewards)),key=rewards.__getitem__)

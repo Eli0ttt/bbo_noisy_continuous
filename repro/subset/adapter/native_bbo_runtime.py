@@ -302,7 +302,7 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
             "exactly once across ask/tell: increment the counter in tell or ask, "
             "never both. In ask(1), each branch must keep every allocation nonnegative; "
             "always cap n_explore <= n_actual before n_exploit = n_actual - n_explore. "
-            "Use local preflight on the final candidate when the assigned tools permit it. "
+            "After writing a candidate, call bbo_preflight_candidate when assigned; if it fails, fix and recheck before finishing. "
             "Candidate code must obey:\n\n" + instruction)
     starter_path = find_project_root() / "environment/methods/main/solver.py"
     starter = starter_path.read_text(encoding="utf-8")

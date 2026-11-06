@@ -17,7 +17,9 @@ def main():
   if s.get('completed_solver_versions')!=s.get('solver_limit'):raise ValueError('Incomplete BBO')
   task_root=root/'dsh_rsi_runs/bbo_noisy_continuous_prebuilt'
  else:
-  if s.get('task')!=a.task or s.get('status')!='completed' or s.get('completed_versions')!=6:
+  expected=s.get('max_versions')
+  if (expected not in (4,6) or s.get('task')!=a.task or s.get('status')!='completed' or
+      s.get('completed_versions')!=expected or len(s.get('candidates',[]))!=expected):
    raise ValueError('Incomplete or mismatched subset run')
   task_root=root/'rsi_exam_tasks'/TASKS[a.task]
  if not (task_root/'task.toml').is_file() or not a.harbor_bin.is_file():raise FileNotFoundError('Task or Harbor unavailable')

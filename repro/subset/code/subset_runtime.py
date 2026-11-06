@@ -54,7 +54,7 @@ def extract(source,task):
  raise ValueError('No complete candidate for this task in terminal report')
 
 def role_hint(agent,task):
- output={'inventory':'Treat space-filling probes and a regime-diverse initial policy portfolio as hypotheses; compare independent progress across the four public regimes; target robust per-case improvements within 48 queries. Optimizer with __init__(dim, lower, upper, budget, seed, rng), ask(n), tell(X,y,metadata=None), 4D [0,1]^4, 48 noisy costs; stdlib + NumPy 2.2.6 only, self-contained solver.py.',
+ output={'inventory':'NumPy 2.2.6 has no np.erf or np.math; use math.erf from the standard library or a validated approximation. Run preflight and public selfcheck. Treat space-filling probes and a regime-diverse initial policy portfolio as hypotheses; compare independent progress across the four public regimes; target robust per-case improvements within 48 queries. Optimizer with __init__(dim, lower, upper, budget, seed, rng), ask(n), tell(X,y,metadata=None), 4D [0,1]^4, 48 noisy costs; stdlib + NumPy 2.2.6 only, self-contained solver.py.',
          'graph':'Consider incremental neighbor-color counts, adaptive tabu/ILS and robust restarts; verify them on the public graphs. Always return n_vertices color entries for EVERY graph; a fallback must be a valid coloring even when a search/helper times out or returns an empty list. Use monotonic per-instance timing; finish each graph in at most 35s including setup and formatting to avoid the 45s kill. solve(data) returning {"colorings": [[int,...], ...]}; fixed target_k, fewer monochromatic edges, each graph <45 seconds; stdlib + NumPy, optional official gc_lib.',
          'qec':'Investigate correlation-aware decoding or color-pair schemes using labeled development data as testable hypotheses, without memorizing public labels. Check all four visible settings, including d7 and d9; preserve shape and per-setting budget. decode(setting,dets) returning a boolean [n_shots,n_observables] array; per-setting decode limit 600/900s; stdlib + NumPy + SciPy + Stim + PyMatching only; dev labels allowed, eval truth withheld.'}[task]
  prompt=agent.prompt if agent.prompt not in ('worker','smoa_aggregator','aggregator','judge','team_worker','processor','debater_initial','debater_round','reviewer_create','reviewer_review','reviewer_revise') else ''
@@ -62,9 +62,13 @@ def role_hint(agent,task):
          +output+' Preserve official interface and generalize to sealed cases. '
          'Research tools are available only when assigned in your YAML. '
          'subset_read_context(item="instruction.md" or "candidate.py"); '
-         'subset_read_public(item="summary"); subset_read_history(item="index" or label); '
-         'subset_write_candidate(source=complete_code); subset_preflight(item="candidate.py") '
-         'after writing. '
+         'subset_read_public(item="summary"); subset_read_history(item="index" or label). '
+         + ('Write the complete code with subset_write_candidate(source=complete_code), '
+            'then call subset_preflight(item="candidate.py"); if it fails, repair the '
+            'source and repeat before finishing. ' if
+            {'subset_write_candidate','subset_preflight'}.issubset(set(agent.tools)) else
+            'Return a complete solver proposal in your report; candidate writing is '
+            'reserved for the terminal agent. ')
          + ('For executable experiments with task-allowed imports, call '
             'subset_public_python(source=Python_text) in the public task image. '
             if 'subset_public_python' in agent.tools else

@@ -135,7 +135,7 @@ class BBOReadContext(_BBOBase):
             self._record(False)
             return "MISSING: your candidate.py is absent; write your own candidate first"
         self._record()
-        return path.read_text(encoding="utf-8")[:100_000]
+        return path.read_text(encoding="utf-8")[:24_000]
 
 
 class BBOReadPublicData(_BBOBase):
@@ -227,15 +227,21 @@ class BBOReadHistory(_BBOBase):
         history = json.loads(path.read_text(encoding="utf-8"))
         if item == "index":
             self._record()
-            return json.dumps([{k: v for k, v in entry.items() if k != "solver_source"}
+            return json.dumps([{"label": entry.get("label"),
+                                "visible_score": entry.get("visible_score"),
+                                "contract_valid": entry.get("contract_valid"),
+                                "error": str(entry.get("error") or "")[:500]}
                                for entry in history], ensure_ascii=False)
         entry = next((e for e in history if e["label"] == item), None)
         if entry is None:
             self._record(False)
             return "DENIED: item must be index or an exact label from this run"
         self._record()
-        answer = json.dumps(entry, ensure_ascii=False)
-        return answer if len(answer) <= 250_000 else "DENIED: candidate history entry is too long"
+        compact = {k: v for k, v in entry.items() if k not in
+                   ("agent_reports", "official_visible_selfcheck", "public_trace")}
+        compact["solver_source"] = str(compact.get("solver_source") or "")[:18000]
+        compact["agent_reports"] = entry.get("agent_reports", [])[:2]
+        return json.dumps(compact, ensure_ascii=False)[:24000]
 
 
 class BBOWriteCandidate(_BBOBase):

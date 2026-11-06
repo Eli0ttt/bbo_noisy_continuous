@@ -41,7 +41,7 @@ class ReadContext(Base):
   path={'instruction.md':self.root/'tool_workspace/instruction.md',
         'candidate.py':self.scratch/'candidate.py'}.get(item)
   ok=path is not None and path.is_file() and not path.is_symlink();self.record(ok)
-  return path.read_text(encoding='utf8')[:100000] if ok else 'DENIED: item unavailable'
+  return path.read_text(encoding='utf8')[:24000] if ok else 'DENIED: item unavailable'
 
 class ReadPublic(Base):
  name='subset_read_public';description=CATALOG[name]
@@ -69,7 +69,7 @@ class ReadHistory(Base):
   if item=='index':self.record(True);return json.dumps([{k:v for k,v in e.items() if k!='source'} for e in entries])
   found=next((x for x in entries if x['label']==item),None)
   self.record(found is not None)
-  return json.dumps(found,ensure_ascii=False)[:180000] if found else 'DENIED: unknown current-session label'
+  return json.dumps(found,ensure_ascii=False)[:24000] if found else 'DENIED: unknown current-session label'
 
 class WriteCandidate(Base):
  name='subset_write_candidate';description=CATALOG[name]

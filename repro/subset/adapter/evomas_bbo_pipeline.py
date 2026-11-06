@@ -67,6 +67,9 @@ class DryRunMetaModel:
         config.setdefault("meta", {})["fake_evolution_step"] = True
         return yaml.safe_dump(config, sort_keys=False)
 
+    def mutate_multi(self, mas_config, execution_logs, observations, model_list=None):
+        return self.mutate(mas_config, execution_logs, observations, model_list)
+
     def crossover(self, mas_config_1, mas_config_2, logs_1, logs_2, model_list=None):
         return self.mutate(mas_config_1, logs_1, "dry-run crossover")
 
@@ -219,10 +222,13 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
                + "\n".join(assessments) + "\nPrior MAS agent reports:\n"
                + "\n".join(agents[:10]) + "\nPrior tool calls:\n"
                + "\n".join(tool_events))
-    decision_path = evaluation_dir.parent / "mutation_trace.jsonl"
+    decision_path = evaluation_dir.parent / "decision_evidence.jsonl"
     if decision_path.is_file():
         recent = [json.loads(line) for line in decision_path.read_text().splitlines()[-4:]]
-        summary += "\nPrior mutation decisions and public outcomes: " + json.dumps(recent)[:4500]
+        summary += "\nPrior decisions and public outcomes: " + json.dumps([
+            {k: x.get(k) for k in ("label", "action", "model_decision", "changed_components",
+                                   "parent_score", "child_score", "insight", "fallback_reason")}
+            for x in recent], ensure_ascii=False)[:4500]
     trace_path = best_dir / "public_trace.json"
     if trace_path.is_file():
         trace = json.loads(trace_path.read_text(encoding="utf-8"))
@@ -274,6 +280,8 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
                 record = json.loads(report_path.read_text(encoding="utf-8"))
             except (ValueError, OSError):
                 continue
+            if not isinstance(record, dict) or "agent_id" not in record:
+                continue
             reports.append({"agent": record.get("agent_id"),
                             "success": record.get("success"),
                             "error": str(record.get("error") or "")[-500:],
@@ -286,7 +294,7 @@ def build_research_feedback(evaluation_dir, candidates, metrics, best_index):
             "contract_valid": candidate["contract_valid"],
             "error": candidate.get("contract_issue", "")[-900:],
             "solver_source": path.read_text(encoding="utf-8"),
-            "agent_reports": reports[:16],
+            "agent_reports": reports[:4],
             "official_visible_selfcheck": json.loads(official_check.read_text(encoding="utf-8"))
                 if official_check.is_file() else None,
             "public_trace": json.loads(candidate_trace.read_text(encoding="utf-8"))
@@ -531,6 +539,37 @@ def evaluate_config(
     solver = (run_dir / "candidate_solver.py").read_text(
         encoding="utf-8"
     )
+    # A source syntax slip can be repaired inside this MAS version, before
+    # spending a public selfcheck or advancing the evolution counter.
+    import ast
+    try:
+        ast.parse(solver)
+    except SyntaxError as syntax_error:
+        (run_dir / "rejected_candidate.py").write_text(solver, encoding="utf-8")
+        repair_feedback = dict(feedback or {})
+        repair_feedback.update({
+            "source_label": label + "_syntax_repair",
+            "solver_source": solver,
+            "source_sha256": hashlib.sha256(solver.encode()).hexdigest(),
+            "source_contract_valid": False,
+            "summary": "The current generated solver has a syntax error at line "
+                       f"{syntax_error.lineno}: {syntax_error.msg}. Repair the complete "
+                       "source, call bbo_preflight_candidate after writing, and return "
+                       "the full working solver.py. Public and sealed objectives are unavailable.",
+            "history": repair_feedback.get("history", []),
+        })
+        try:
+            runtime_summary = execute_mas(config_path, instruction, run_dir,
+                dry_run=False, tool_mode=tool_mode, feedback=repair_feedback,
+                container=container)
+            repaired_source = (run_dir / "candidate_solver.py").read_text(encoding="utf-8")
+            ast.parse(repaired_source)
+            solver = repaired_source
+            (run_dir / "syntax_repair_success.txt").write_text(str(syntax_error)[:500])
+        except Exception as repair_error:
+            (run_dir / "syntax_repair_failed.txt").write_text(str(repair_error)[:500])
+            solver = (run_dir / "rejected_candidate.py").read_text(encoding="utf-8")
+            (run_dir / "candidate_solver.py").write_text(solver, encoding="utf-8")
     try:
         result = evaluate_solver(solver, run_dir, container)
     except CandidateSelfcheckError as exc:
@@ -620,7 +659,7 @@ def main():
     parser.add_argument("--solver-limit", "--max-solver-versions", dest="solver_limit", type=int, default=12)
     parser.add_argument("--research-time-limit", type=float, default=None,
                         help="Optional research-only soft wall-time target; default is no artificial limit")
-    parser.add_argument("--mutation-mode", choices=("original",),
+    parser.add_argument("--mutation-mode", choices=("original", "multi"),
                         default="original")
     parser.add_argument("--tool-mode", choices=("none", "bbo"), default="none")
     parser.add_argument("--seed", type=int, default=42)
@@ -796,6 +835,7 @@ def main():
             verbose=True,
         )
         meta_model.mutation_decision_path = args.output_dir / "mutation_rationales.jsonl"
+        meta_model.multi_trace_path = args.output_dir / "multi_trace.jsonl"
         meta_model.bbo_tool_policy = (
             "For the BBO no-tool baseline keep tools: [] on every agent."
             if args.tool_mode == "none" else CATALOG_TEXT
@@ -1016,7 +1056,7 @@ def main():
         if use_mutation:
             offspring = recover_meta(f"step_{step:02d}_mutation",
                 lambda: configs[best_index],
-                meta_model.mutate,
+                meta_model.mutate_multi if args.mutation_mode == "multi" else meta_model.mutate,
                 configs[best_index],
                 metrics[best_index],
                 feedback["summary"] if feedback is not None else "dry-run feedback",
@@ -1048,13 +1088,13 @@ def main():
             )
             action = "crossover"
 
-        try:
+        def check_offspring(text):
             if args.tool_mode == "bbo":
-                offspring = ensure_session_history_tool(offspring)
-            validated_config(offspring, args.tool_mode)
+                text = ensure_session_history_tool(text)
+            validated_config(text, args.tool_mode)
             if action == "mutation":
                 old_cfg = yaml.safe_load(configs[old_index])
-                new_cfg = yaml.safe_load(offspring)
+                new_cfg = yaml.safe_load(text)
                 changed = [field for field in ("prompt", "model_id", "tools")
                            if any(old_cfg["agents"].get(k, {}).get(field) !=
                                   new_cfg["agents"].get(k, {}).get(field)
@@ -1064,21 +1104,54 @@ def main():
                     changed.append("topology")
                 if len(changed) != 1:
                     raise ValueError(f"Mutation must change one component; got {changed}")
-        except (ValueError, TypeError, KeyError, yaml.YAMLError) as exc:
+            return text
+
+        invalid_reason = None
+        try:
+            offspring = check_offspring(offspring)
+        except (ValueError, TypeError, KeyError, yaml.YAMLError) as first_error:
             label = f"step_{step:02d}_{action}"
             (evaluation_dir / f"{label}.rejected.yaml").write_text(str(offspring), encoding="utf-8")
-            (evaluation_dir / f"{label}.fallback_reason.txt").write_text(str(exc))
-            offspring = validated_config(configs[old_index], args.tool_mode)
-        child_metrics = evaluate_config(
-            offspring,
-            f"step_{step:02d}_{action}",
-            evaluation_dir,
-            args.instruction,
-            args.container,
-            args.dry_run,
-            args.tool_mode,
-            feedback=feedback,
-        )
+            repair_note = ("Previous draft was rejected before any MAS execution: "
+                           + str(first_error)[:500]
+                           + ("; parser detail: " + meta_model.last_mutation_validation_error
+                              if action == "mutation" and
+                              getattr(meta_model, "last_mutation_validation_error", None) else "")
+                           + ". Return a complete valid YAML; "
+                           "mutation must alter exactly one component type.")
+            try:
+                if action == "mutation":
+                    repaired = (meta_model.mutate_multi if args.mutation_mode == "multi" else meta_model.mutate)(configs[old_index], metrics[old_index],
+                        (feedback["summary"] if feedback else "") + "\n" + repair_note,
+                        model_list=args.model_pool)
+                else:
+                    left = dict(metrics[ranked[0]], repair_instruction=repair_note)
+                    right = dict(metrics[ranked[1]], repair_instruction=repair_note)
+                    repaired = meta_model.crossover(configs[ranked[0]], configs[ranked[1]],
+                        left, right, model_list=args.model_pool)
+                offspring = check_offspring(repaired)
+                (evaluation_dir / f"{label}.repair_success.txt").write_text(repair_note)
+            except Exception as repair_error:
+                (evaluation_dir / f"{label}.fallback_reason.txt").write_text(
+                    str(first_error)[:500] + "\nRepair failed: " + str(repair_error)[:500])
+                invalid_reason = ("MAS configuration rejected before execution: "
+                                  + str(first_error)[:500] + "; repair: "
+                                  + str(repair_error)[:500])
+                offspring = validated_config(configs[old_index], args.tool_mode)
+        if invalid_reason is not None:
+            (evaluation_dir / f"{label}.yaml").write_text(offspring, encoding="utf-8")
+            child_metrics = mark_interrupted_candidate(evaluation_dir, label, invalid_reason)
+        else:
+            child_metrics = evaluate_config(
+                offspring,
+                f"step_{step:02d}_{action}",
+                evaluation_dir,
+                args.instruction,
+                args.container,
+                args.dry_run,
+                args.tool_mode,
+                feedback=feedback,
+            )
         child_reward = compute_reward(
             child_metrics,
             beta=args.beta, cost_weight=args.cost_weight,
@@ -1097,6 +1170,41 @@ def main():
             "reward": child_reward,
             "improved": best_index == len(rewards) - 1,
         })
+        old_cfg = yaml.safe_load(configs[old_index])
+        new_cfg = yaml.safe_load(offspring)
+        changed = [field for field in ("prompt", "model_id", "tools")
+                   if any(old_cfg["agents"].get(k, {}).get(field) !=
+                          new_cfg["agents"].get(k, {}).get(field)
+                          for k in set(old_cfg["agents"]) | set(new_cfg["agents"]))]
+        if old_cfg.get("topology") != new_cfg.get("topology") or set(old_cfg["agents"]) != set(new_cfg["agents"]):
+            changed.append("topology")
+        item = None
+        if action == "mutation" and rationale_path.is_file():
+            lines = rationale_path.read_text().splitlines()
+            if len(lines) > rationale_count:
+                item = json.loads(lines[-1])
+        decision = item.get("decision") if item else None
+        parent_score = metrics[old_index].get("bbo_score")
+        child_score = child_metrics.get("bbo_score")
+        actual = ("unknown" if parent_score is None or child_score is None else
+                  "increase" if child_score > parent_score + 1e-9 else
+                  "decrease" if child_score < parent_score - 1e-9 else "same")
+        predicted = decision.get("predicted_direction") if isinstance(decision, dict) else None
+        fallback = evaluation_dir / f"step_{step:02d}_{action}.fallback_reason.txt"
+        insight = ("No effective MAS change; score variation is not causal evidence." if not changed else
+                   "Visible score improved; hypothesis remains provisional." if actual == "increase" else
+                   "Visible score declined or tied; revise the proposed mechanism.")
+        with (args.output_dir / "decision_evidence.jsonl").open("a", encoding="utf-8") as record:
+            record.write(json.dumps({"label": f"step_{step:02d}_{action}", "action": action,
+                "selected_parent": candidates[old_index]["label"], "model_decision": decision,
+                "model_declared_rationale": item.get("declared_rationale") if item else None,
+                "changed_components": changed, "effective_change": bool(changed),
+                "parent_score": parent_score, "child_score": child_score,
+                "reward_delta": child_reward - rewards[old_index], "actual_direction": actual,
+                "prediction_met": (actual == predicted if predicted in ("increase", "decrease", "same")
+                                   and actual != "unknown" else None), "insight": insight,
+                "fallback_reason": fallback.read_text()[:500] if fallback.is_file() else None},
+                ensure_ascii=False, default=str) + "\n")
         if action == "mutation" and not args.dry_run:
             with (args.output_dir / "mutation_trace.jsonl").open("a", encoding="utf-8") as trace_out:
                 trace_out.write(json.dumps({"event": "outcome", "step": step,

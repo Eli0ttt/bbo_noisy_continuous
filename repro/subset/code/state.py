@@ -26,7 +26,25 @@ def adapt(text,task,source_task=None):
  if not isinstance(c,dict) or not isinstance(c.get('agents'),dict):raise ValueError('Invalid MAS YAML')
  mapping=TO_BBO if task=='bbo' else TO_SUBSET
  allowed=set(BBO if task=='bbo' else SUBSET)
- for a in c['agents'].values():
+ for agent_id,a in c['agents'].items():
+  if source_task is None and task in ('graph','qec'):
+   if task=='graph':
+    focus=('Investigate different search and restart strategies on all public graphs; '
+           'compare conflict counts and per-graph runtime.' if agent_id.endswith(('1','_1')) else
+           'Challenge local move selection, time guards and return shape on large graphs; '
+           'preserve a valid coloring on every path.')
+    if agent_id=='aggregator':
+     focus=('Compare proposals using public conflict counts. Produce complete solve(data) '
+            'and verify each coloring has the right length, integer color range, and '
+            'finishes within the official 45-second per-graph cap.')
+   else:
+    focus=('Investigate the color-code syndrome structure and test a decoder hypothesis '
+           'against the labeled public development data.' if agent_id.endswith(('1','_1')) else
+           'Challenge the decoder on d7 and d9, shape, generalization and per-setting time.')
+    if agent_id=='aggregator':
+     focus=('Compare all four public settings. Produce complete decode(setting,dets), '
+            'a boolean [n_shots,n_observables] array, within each official per-setting budget.')
+   a['prompt']=focus+' Use only the official task-allowed imports and public tools.'
   if source_task in TASKS and source_task!=task:
    # Carry the MAS roles/topology/model knowledge, but not another task's solver instructions.
    role=str(a.get('role') or a.get('id') or 'worker')[:80]
@@ -37,6 +55,8 @@ def adapt(text,task,source_task=None):
   for t in a.get('tools',[]):
    mapped=mapping.get(t,t)
    if mapped in allowed and mapped not in tools:tools.append(mapped)
+  if source_task is None and task in ('graph','qec') and agent_id!='aggregator':
+   tools=[tool for tool in tools if tool not in ('subset_write_candidate','subset_preflight')]
   a['tools']=tools
   if task=='bbo' and 'bbo_read_history' not in tools:a['tools'].append('bbo_read_history')
   if a.get('model_id') not in ('openai:deepseek-v4-flash-s1','openai:deepseek-v4-flash-s2'):
@@ -64,7 +84,13 @@ def export(state,task,dest):
   source_task=next((name for name in TASKS if p.stem.startswith('evolved_'+name+'_')),None)
   if p.name not in ('majority_vote.yaml','smoa.yaml') and source_task != task:continue
   (dest/'working_pool'/p.name).write_text(adapt(p.read_text(),task,source_task),encoding='utf8')
- atom(dest/'memory.json',memory)
+ memory=[item for item in memory if item.get('task')==task or
+         (not item.get('task') and TASKS[task] in item.get('query',''))]
+ # The state keeps task routing metadata; EvoMAS ActionExperience accepts only
+ # its seven original fields when loading the per-run memory snapshot.
+ experience_fields=('query','action','config_changes','old_accuracy',
+                    'new_accuracy','success','analysis')
+ atom(dest/'memory.json',[{key:item[key] for key in experience_fields} for item in memory])
  atom(dest/'manifest.json',{'schema':manifest['schema'],
   'runs':[{'task':x['task'],'config_sha256':x['config_sha256']} for x in manifest['runs']]})
  atom(dest/'provenance.json',{'state':str(state.resolve()),'task':task,
@@ -77,7 +103,10 @@ def summary_of(run):
  if task=='bbo':
   if s.get('completed_solver_versions')!=s.get('solver_limit'):raise ValueError('Incomplete BBO')
  else:
-  if s.get('status')!='completed' or s.get('completed_versions')!=6:raise ValueError('Incomplete subset run')
+  expected=s.get('max_versions')
+  if (expected not in (4,6) or s.get('status')!='completed' or
+      s.get('completed_versions')!=expected or len(s.get('candidates',[]))!=expected):
+   raise ValueError('Incomplete subset run or unsupported version count')
  if s.get('hidden_status')!='completed' or not isinstance(s.get('hidden_score'),(int,float)):
   raise ValueError('Hidden score required before committing knowledge')
  winner=run/'best_visible_solver.py'
@@ -92,17 +121,17 @@ def consolidate(root,task,run,s):
   trace=(run/'evolution_trace.txt').read_text(encoding='utf8')[:7000]
   candidates=[{'label':c.get('label'),'score':c.get('visible_score'),'valid':c.get('contract_valid')}
               for c in s.get('candidates',[])]
-  config=run/'best_config.yaml'
+  config=run/'best_visible_config.yaml'
  else:
   operations=s.get('operations',[])
   trace=json.dumps(operations,ensure_ascii=False)[:7000]
   candidates=[{'label':c.get('label'),'score':c.get('visible',{}).get('metric'),
                'valid':c.get('valid')} for c in s['candidates']]
-  config=run/'best_reward_config.yaml'
+  config=run/'evaluations'/f"{s['best_visible']['label']}.yaml"
  if not config.is_file():raise FileNotFoundError(config)
  payload={'task':task,'public_candidates':candidates,'operations':operations,'trace':trace,
           'best_config_excerpt':config.read_text(encoding='utf8')[:9000]}
- prompt=('Summarize this ONE completed RSI-Exam research task into one transferable EvoMAS '
+ prompt=('Summarize this ONE completed RSI-Exam research task into one task-specific EvoMAS '
          'experience. Identify which prompt, model assignment, tools, or DAG coordination '
          'helped and which failed. Distinguish observed evidence from hypotheses. Use only '
          'the PUBLIC observations supplied; do not invent sealed labels or numerical scores. '
@@ -123,7 +152,7 @@ def commit(root,state,run):
   raw=config.read_text(encoding='utf8');digest=hashlib.sha256(raw.encode()).hexdigest()
   cfg=yaml.safe_load(raw)
   cfg['name']=f'evolved_{task}_{digest[:12]}'
-  cfg['description']=f'Public-reward best MAS from RSI-Exam {TASKS[task]}; adapt for new tasks'
+  cfg['description']=f'Public-score best MAS from RSI-Exam {TASKS[task]}; use for this task only'
   cfg['successful_tasks']=[{'q':'RSI-Exam '+TASKS[task],
      'notes':'Best configuration on public cases; do not compare raw metrics across tasks'}]
   raw=yaml.safe_dump(cfg,sort_keys=False,allow_unicode=True)
@@ -140,22 +169,27 @@ def commit(root,state,run):
    sys.path.insert(0,str(root/'repro/subset/code'))
    from subset_runtime import validate_yaml
    validate_yaml(raw)
-  improved=any(op.get('improved') for op in s.get('operations',[]))
+  candidates=s.get('candidates',[])
+  def score(c):return c.get('visible',{}).get('metric') if task!='bbo' else c.get('visible_score')
+  parent_scores=[score(c) for c in candidates if c.get('label') in ('parent_00','parent_01')
+                 and isinstance(score(c),(int,float)) and
+                 (c.get('valid',True) if task!='bbo' else c.get('contract_valid',True))]
+  best=(s['best_visible'].get('visible',{}).get('metric') if task!='bbo'
+        else s['best_visible'].get('visible_score'))
+  improved=(s['best_visible'].get('label','').startswith('step_') and
+            isinstance(best,(int,float)) and bool(parent_scores) and
+            (best<min(parent_scores) if task=='graph' else best>max(parent_scores)))
   distinct=all(yaml.safe_load(config.read_text(encoding='utf8')) != yaml.safe_load(x)
                for x in parent_texts)
   if improved and distinct:out.write_text(raw,encoding='utf8')
   memory=json.loads((state/'memory.json').read_text())
-  candidates=s.get('candidates',[])
-  def score(c):return c.get('visible',{}).get('metric') if task!='bbo' else c.get('visible_score')
-  values=[score(c) for c in candidates if isinstance(score(c),(int,float))]
-  first=float(values[0]) if values else 0.0
-  best=(s['best_visible'].get('visible',{}).get('metric') if task!='bbo'
-        else s['best_visible'].get('visible_score'))
+  first=float(parent_scores[0]) if parent_scores else 0.0
   memory_query=('RSI-Exam Query-Budgeted Noisy Black-Box Optimization bbo_noisy_continuous'
                 if task=='bbo' else 'RSI-Exam '+TASKS[task])
   memory.append({'query':memory_query, 'action':'consolidate',
     'config_changes':f'Best MAS {digest[:12]}; {len(operations_of(s))} evolution operations',
-    'old_accuracy':first,'new_accuracy':float(best or 0),'success':bool(best is not None and best>first),
+    'old_accuracy':first,'new_accuracy':float(best or 0),
+    'success':bool(improved and distinct),'task':task,
     'analysis':analysis})
   atom(state/'memory.json',memory)
   manifest['runs'].append({'task':task,'run':str(run.resolve()),'config_sha256':digest,

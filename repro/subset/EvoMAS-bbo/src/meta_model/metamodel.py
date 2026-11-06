@@ -462,6 +462,7 @@ execution:
             Mutated MAS configuration as YAML string
         """
         logger.info("MUTATE: Modifying MAS based on observations")
+        self.last_mutation_validation_error = None
 
         # Load prompt template
         template = self.prompt_registry.get("meta_mutate")
@@ -481,7 +482,13 @@ execution:
             "execution_logs": str(execution_logs),
             "accuracy": execution_logs.get('accuracy', 'N/A'),
             "errors": execution_logs.get('errors', 'None'),
-            "observations": observations,
+            "observations": observations + (
+                "\nBefore the complete fenced yaml block output one fenced json block "
+                "with keys observed_evidence, root_cause_hypothesis, component, "
+                "intended_change, predicted_effect, predicted_direction. "
+                "Set predicted_direction to increase, decrease, or unknown for the "
+                "PUBLIC task score. Distinguish observations from hypotheses. "
+                "Change exactly one of prompt, model_id, tools, topology in the YAML."),
             "model_constraint": model_constraint
         }
 
@@ -518,16 +525,29 @@ execution:
             decision_path = getattr(self, "mutation_decision_path", None)
             if decision_path:
                 import json
-                rationale = response.split("```yaml", 1)[0][:2000]
+                import re
+                rationale = response.split("```yaml", 1)[0][:2500]
+                match = re.search(r"```json\s*(\{.*?\})\s*```", rationale, re.S | re.I)
+                try:
+                    decision = json.loads(match.group(1)) if match else None
+                except json.JSONDecodeError:
+                    decision = None
                 with Path(decision_path).open("a", encoding="utf-8") as stream:
-                    stream.write(json.dumps({"declared_rationale": rationale},
+                    stream.write(json.dumps({"declared_rationale": rationale,
+                                             "decision": decision},
                                             ensure_ascii=False) + "\n")
 
             # Extract YAML from response
             mutated_config = extract_yaml_from_response(response)
 
-            # Validate mutated config
+            # Keep a diagnostic for the caller's same-version YAML repair.
             if not validate_mas_config(mutated_config):
+                try:
+                    yaml.safe_load(mutated_config)
+                except yaml.YAMLError as error:
+                    self.last_mutation_validation_error = str(error)[:500]
+                else:
+                    self.last_mutation_validation_error = "MAS schema or model allow-list validation failed"
                 logger.warning("Mutated config validation failed, falling back to original")
                 return mas_config
 
@@ -538,6 +558,92 @@ execution:
             logger.error(f"Mutation failed: {e}")
             logger.warning("Falling back to original configuration")
             return mas_config
+
+    def mutate_multi(self, mas_config, execution_logs, observations, model_list=None):
+        """Two independent analysts, one YAML writer, one meta reviewer; one revision."""
+        import asyncio
+        import inspect
+        import json
+        import re
+
+        def ask(model, prompt):
+            result = model(prompt)
+            if inspect.isawaitable(result):
+                result = asyncio.run(result)
+            return str(result)
+
+        def audit(round_no, role, content):
+            path = getattr(self, "multi_trace_path", None)
+            if path:
+                with Path(path).open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"round": round_no, "role": role,
+                                             "content": str(content)[:6000]},
+                                            ensure_ascii=False) + "\n")
+
+        def one_change(candidate):
+            old, new = yaml.safe_load(mas_config), yaml.safe_load(candidate)
+            agents_old, agents_new = old["agents"], new["agents"]
+            changed = [field for field in ("prompt", "model_id", "tools")
+                       if any(agents_old.get(key, {}).get(field) !=
+                              agents_new.get(key, {}).get(field)
+                              for key in set(agents_old) | set(agents_new))]
+            if old.get("topology") != new.get("topology") or set(agents_old) != set(agents_new):
+                changed.append("topology")
+            return changed
+
+        try:
+            skeptic_id = model_list[1] if model_list and len(model_list) > 1 else self.model_id
+            skeptic = get_model(model_id=skeptic_id, temperature=0.3, max_tokens=1400)
+            reviewer_feedback = ""
+            for round_no in (1, 2):
+                debate = []
+                for role, model in (("diagnostician", self.model), ("skeptic", skeptic)):
+                    prompt = ("You are an independent MAS evolution analyst (" + role + "). "
+                              "Use only public observations. Propose exactly one of prompt, "
+                              "model_id, tools, topology to change. State evidence, hypothesis, "
+                              "exact edit, and predicted public-score effect in at most 250 words. "
+                              "Do not write YAML.\nCurrent YAML:\n" + mas_config[:12000]
+                              + "\nPublic observations:\n" + str(observations)[-6500:]
+                              + "\nReviewer feedback:\n" + reviewer_feedback[:1500])
+                    opinion = ask(model, prompt)[:3000]
+                    audit(round_no, role, opinion)
+                    debate.append(role + ": " + opinion)
+                instruction = (str(observations)[-6500:] + "\nMulti-agent discussion:\n"
+                               + "\n".join(debate)[:5500] + "\nReviewer feedback:\n"
+                               + reviewer_feedback[:1500] + "\nChoose ONE component and output full YAML.")
+                candidate = self.mutate(mas_config, execution_logs, instruction,
+                                        model_list=model_list)
+                try:
+                    valid = validate_mas_config(candidate)
+                    changed = one_change(candidate) if valid else []
+                    if len(changed) != 1:
+                        raise ValueError("Expected one changed component; observed " + repr(changed))
+                    local_error = ""
+                except Exception as error:
+                    local_error = str(error)[:700]
+                review_prompt = ("Review the proposed MAS YAML against the current config, "
+                                 "debate, public evidence, exactly one changed component and "
+                                 "task constraints. Reply ONLY JSON with approve (boolean) "
+                                 "and feedback (brief actionable text).\nDebate:\n"
+                                 + "\n".join(debate)[:5000]
+                                 + "\nLocal validation error: " + local_error
+                                 + "\nCurrent YAML:\n" + mas_config[:9000]
+                                 + "\nProposed YAML:\n" + candidate[:12000])
+                review = ask(self.model, review_prompt)
+                audit(round_no, "reviewer", review)
+                match = re.search(r"\{.*\}", review, re.S)
+                try:
+                    verdict = json.loads(match.group(0)) if match else {}
+                except ValueError:
+                    verdict = {}
+                if not local_error and verdict.get("approve") is True:
+                    return candidate
+                reviewer_feedback = (local_error + " " + str(verdict.get("feedback", "")))[:1500]
+            audit(2, "outcome", "rejected after two review rounds")
+        except Exception as error:
+            logger.warning("Multi meta analysis failed: %s", error)
+            audit(0, "error", str(error))
+        return mas_config
 
     def crossover(
         self,

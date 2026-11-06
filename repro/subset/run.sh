@@ -3,8 +3,10 @@ set -euo pipefail
 ROOT="$(cd "${1:?Usage: run.sh ROOT STATE TASK MODE SEED}" && pwd)"
 STATE="$(realpath "${2:?STATE}")"; TASK="${3:?TASK}"; MODE="${4:?MODE}"; SEED="${5:?SEED}"
 [[ "$TASK" =~ ^(bbo|inventory|graph|qec)$ ]] || exit 2
-[[ "$MODE" == original ]] || exit 2
+[[ "$MODE" == original || "$MODE" == multi ]] || exit 2
 [[ "$SEED" =~ ^[0-9]+$ ]] || exit 2
+VERSIONS="${SUBSET_MAX_VERSIONS:-6}"
+[[ "$VERSIONS" == 4 || "$VERSIONS" == 6 ]] || { echo "SUBSET_MAX_VERSIONS must be 4 or 6" >&2; exit 2; }
 cd "$ROOT"
 set -a
 source "$ROOT/env/dsh_bbo_experiment.env"
@@ -28,7 +30,7 @@ if [[ "$TASK" == bbo ]];then
     --evomas-root "$FORK/EvoMAS-bbo" --seed-pool "$INPUT/working_pool" \
     --instruction "$ROOT/instruction.md" --output-dir "$OUT" --container "$CONTAINER" \
     --meta-model deepseek-v4-flash-s1 --model-pool deepseek-v4-flash-s1,deepseek-v4-flash-s2 \
-    --num-parents 2 --max-solver-versions 6 --skip-final-repeat \
+    --num-parents 2 --max-solver-versions "$VERSIONS" --skip-final-repeat \
     --mutation-probability 0.7 --mutation-mode "$MODE" --tool-mode bbo \
     --seed "$SEED" --pool-warm-start \
     --knowledge-scope cross-run --initial-memory "$INPUT/memory.json" \
@@ -45,7 +47,7 @@ else
   python "$FORK/code/run_subset_task.py" "$TASK" \
     --project-root "$ROOT" --task-root "$TASK_ROOT" --seed-pool "$INPUT/working_pool" \
     --initial-memory "$INPUT/memory.json" --output-dir "$OUT" \
-    --mutation-mode "$MODE" --seed "$SEED" --max-versions 6 \
+    --mutation-mode "$MODE" --seed "$SEED" --max-versions "$VERSIONS" \
     --mutation-probability 0.7 2>&1 | tee "$OUT.log"
 fi
 cp "$INPUT/provenance.json" "$OUT/input_provenance.json"
