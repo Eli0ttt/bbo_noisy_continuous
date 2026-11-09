@@ -1,0 +1,364 @@
+name: evolved_graph_4d0c9fdbfe3d
+description: Public-score best MAS from RSI-Exam johnson1991_leighton_graph_coloring;
+  use for this task only
+backend: smolagents
+agents:
+  proc_l1_1:
+    id: proc_l1_1
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: 'Task: Graph coloring conflict minimization. You inherit a TabuCol baseline
+      at /app/methods/main/solver.py and gc_lib.py.
+
+
+      Goal: For each graph with fixed color budget target_k (equal to best-known chromatic
+      number), assign each vertex a color in [0, target_k) to MINIMIZE monochromatic
+      edges. A proper (conflict-free) coloring exists but is very hard to find.
+
+
+      Hard constraints:
+
+      - Only standard library + numpy allowed (no networkx, scipy, etc.)
+
+      - Per-instance 45s hard cap - each graph solved independently
+
+      - Return colorings list in same order as data[''instances'']
+
+      - Each coloring: length = n_vertices, colors integers in [0, target_k)
+
+
+      Propose a concrete fast incremental conflict-minimizing search that improves
+      upon TabuCol. You MUST provide:
+
+      - A specific bounded update rule with exact pseudocode (no vague descriptions)
+
+      - O(n*m) or better complexity per iteration, with explicit analysis for 1000-vertex
+      graphs
+
+      - A concrete tabu tenure formula and aspiration criterion
+
+      - How to handle plateaus (specific restart condition)
+
+      - A fallback to TabuCol if your method fails to improve within 10s
+
+
+      Focus on minimizing conflicts aggressively (aim for 0) while staying under 45s
+      per graph.
+
+
+      Use subset_read_context, subset_read_public, subset_read_history to understand
+      the baseline.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 4096
+    temperature: 0.3
+    device: null
+  proc_l1_2:
+    id: proc_l1_2
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: 'Task: Graph coloring conflict minimization. You inherit a TabuCol baseline
+      at /app/methods/main/solver.py and gc_lib.py.
+
+
+      Goal: For each graph with fixed color budget target_k (equal to best-known chromatic
+      number), assign each vertex a color in [0, target_k) to MINIMIZE monochromatic
+      edges. A proper (conflict-free) coloring exists but is very hard to find.
+
+
+      Hard constraints:
+
+      - Only standard library + numpy allowed (no networkx, scipy, etc.)
+
+      - Per-instance 45s hard cap - each graph solved independently
+
+      - Return colorings list in same order as data[''instances'']
+
+      - Each coloring: length = n_vertices, colors integers in [0, target_k)
+
+
+      Propose a concrete initialization and restart strategy for the search. You MUST
+      provide:
+
+      - A specific initialization algorithm (e.g., greedy DSATUR variant, or RLF-like)
+      with exact steps and complexity O(n^2) or better
+
+      - A concrete restart mechanism: when to restart (after how many non-improving
+      iterations), what to change (e.g., random perturbation percentage, color permutation)
+
+      - Explicit large-graph complexity analysis (250-1000 vertices) showing per-iteration
+      cost
+
+      - A fallback to TabuCol if your method fails to improve within 10s
+
+
+      Focus on escaping local minima and avoiding bad initial colorings.
+
+
+      Use subset_read_context, subset_read_public, subset_read_history to understand
+      the baseline.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 4096
+    temperature: 0.4
+    device: null
+  judge_l1:
+    id: judge_l1
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: 'Task: Compare two graph coloring proposals for conflict minimization.
+
+
+      You have received two proposals for improving a TabuCol baseline:
+
+      - Proposal 1 (from proc_l1_1): Fast incremental conflict-minimizing search
+
+      - Proposal 2 (from proc_l1_2): Alternative initialization and restart strategy
+
+
+      Evaluate both proposals on:
+
+      1. Public conflicts reduction potential (will it actually reduce conflicts below
+      TabuCol?)
+
+      2. 45-second feasibility (can it run on 250-1000 vertex graphs within 45s?)
+
+      3. Implementation risk (how likely is it to crash or violate constraints?)
+
+      4. numpy-only compatibility (no forbidden imports)
+
+      5. Correctness of color range [0, target_k) and output format
+
+
+      Select the most promising direction for refinement. Be specific about which
+      proposal to pursue and why.
+
+
+      Use subset_read_context, subset_read_public, subset_read_history to access information.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 2048
+    temperature: 0.2
+    device: null
+  proc_l2_1:
+    id: proc_l2_1
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s1
+    prompt: 'Task: Refine the selected graph coloring search implementation.
+
+
+      You are given the selected direction from the judge. Your job is to implement
+      and refine it.
+
+
+      Goal: For each graph with fixed color budget target_k, assign colors in [0,
+      target_k) to MINIMIZE conflicts. Target 0 conflicts but any reduction helps.
+
+
+      Hard constraints:
+
+      - Edit /app/methods/main/solver.py (keep solve(data) signature)
+
+      - Only standard library + numpy
+
+      - Per-instance 45s hard cap
+
+      - Return: {''colorings'': [[color_0, ...], ...]} with colors in [0, target_k)
+
+
+      Focus on:
+
+      - Addressing a measured conflict or throughput bottleneck in the selected approach
+
+      - Making the implementation robust for graphs of 250-1000 vertices
+
+      - Self-check: ensure every coloring has correct length and color range
+
+      - Use TabuCol as fallback if your method fails
+
+
+      Use subset_read_context, subset_read_public, subset_read_history to study the
+      baseline and judge''s selection.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 4096
+    temperature: 0.3
+    device: null
+  proc_l2_2:
+    id: proc_l2_2
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s1
+    prompt: 'Task: Independently challenge and stress-test the selected graph coloring
+      algorithm.
+
+
+      You are given the selected direction from the judge. Your job is to build an
+      independent implementation that challenges it.
+
+
+      Goal: For each graph with fixed color budget target_k, assign colors in [0,
+      target_k) to MINIMIZE conflicts. Target 0 conflicts but any reduction helps.
+
+
+      Hard constraints:
+
+      - Edit /app/methods/main/solver.py (keep solve(data) signature)
+
+      - Only standard library + numpy
+
+      - Per-instance 45s hard cap
+
+      - Return: {''colorings'': [[color_0, ...], ...]} with colors in [0, target_k)
+
+
+      Focus on:
+
+      - Testing the algorithm against deadlines (45s per graph)
+
+      - Testing color validity (all colors in [0, target_k))
+
+      - Testing on relabelled/permuted vertex graphs (robustness to vertex ordering)
+
+      - Finding edge cases where the selected approach might fail
+
+      - Proposing fixes or alternatives
+
+
+      Use subset_read_context, subset_read_public, subset_read_history to study the
+      baseline and judge''s selection.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 4096
+    temperature: 0.35
+    device: null
+  judge_l2:
+    id: judge_l2
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: 'Task: Compare two graph coloring revisions and select the best.
+
+
+      You have received two revisions of the selected graph coloring approach:
+
+      - Revision 1 (from proc_l2_1): Refined implementation addressing bottlenecks
+
+      - Revision 2 (from proc_l2_2): Independent challenge with stress-testing
+
+
+      Evaluate both revisions on:
+
+      1. Public per-graph conflicts (lower is better)
+
+      2. Correctness: all colorings valid (length, range [0, target_k), integers)
+
+      3. Runtime: both under 45s per graph?
+
+      4. Robustness: handles different graph sizes and structures?
+
+      5. Code quality: clean, well-structured, no forbidden imports
+
+
+      State unresolved risks for each revision. Select the best revision or identify
+      which parts of each to merge.
+
+
+      Use subset_read_context, subset_read_public, subset_read_history to access information.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 2048
+    temperature: 0.2
+    device: null
+  aggregator:
+    id: aggregator
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: 'Task: Synthesize the best graph coloring solution from two revisions.
+
+
+      You have:
+
+      - Judge''s comparison of two revisions
+
+      - The two revision implementations
+
+
+      Your job: Write one complete solve(data) function in /app/methods/main/solver.py
+      that returns {''colorings'': [...]}.
+
+
+      CRITICAL INSTRUCTIONS:
+
+      1. Compare both revisions by their conflict counts per graph - select the LOWER
+      conflict version for each graph
+
+      2. If one revision crashes or times out, fall back to the other
+
+      3. If both fail, implement a robust TabuCol fallback (from gc_lib.py reference_tabucol)
+
+      4. Ensure every coloring: length = n_vertices, colors in [0, target_k), all
+      integers
+
+      5. Self-check within 45 seconds per graph - if a graph would exceed 45s, use
+      a faster method
+
+      6. Use only standard library + numpy - NO other imports
+
+      7. Return colorings in the SAME ORDER as data[''instances'']
+
+
+      Tools available for testing: subset_write_candidate, subset_preflight, subset_public_python
+
+
+      Remember: The verifier runs on SEALED hidden graphs with permuted vertex labels.
+      Your solution must be robust and general, not hardcoded.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    - subset_write_candidate
+    - subset_preflight
+    - subset_public_python
+    max_tokens: 4096
+    temperature: 0.2
+    device: null
+topology:
+  reports_to:
+    proc_l1_1:
+    - judge_l1
+    proc_l1_2:
+    - judge_l1
+    judge_l1:
+    - proc_l2_1
+    - proc_l2_2
+    proc_l2_1:
+    - judge_l2
+    proc_l2_2:
+    - judge_l2
+    judge_l2:
+    - aggregator
+execution:
+  parallel_workers: true
+  timeout: 900
+  max_retries: 1
+successful_tasks:
+- q: RSI-Exam johnson1991_leighton_graph_coloring
+  notes: Best configuration on public cases; do not compare raw metrics across tasks

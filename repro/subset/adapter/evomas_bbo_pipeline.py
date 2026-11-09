@@ -1104,6 +1104,10 @@ def main():
                     changed.append("topology")
                 if len(changed) != 1:
                     raise ValueError(f"Mutation must change one component; got {changed}")
+            else:
+                new_cfg = yaml.safe_load(text)
+                if any(new_cfg == yaml.safe_load(configs[i]) for i in ranked[:2]):
+                    raise ValueError("Crossover returned an unchanged parent configuration")
             return text
 
         invalid_reason = None
@@ -1117,8 +1121,9 @@ def main():
                            + ("; parser detail: " + meta_model.last_mutation_validation_error
                               if action == "mutation" and
                               getattr(meta_model, "last_mutation_validation_error", None) else "")
-                           + ". Return a complete valid YAML; "
-                           "mutation must alter exactly one component type.")
+                           + (". Return complete valid YAML changing exactly one component type."
+                              if action == "mutation" else
+                              ". Return complete valid YAML recombining and differing from both parents."))
             try:
                 if action == "mutation":
                     repaired = (meta_model.mutate_multi if args.mutation_mode == "multi" else meta_model.mutate)(configs[old_index], metrics[old_index],

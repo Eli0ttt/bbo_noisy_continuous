@@ -1,0 +1,105 @@
+name: evolved_qec_3edd1ff39077
+description: Public-score best MAS from RSI-Exam qec_decoder_arena; use for this task
+  only
+backend: smolagents
+agents:
+  worker1:
+    id: worker1
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: 'Generate a complete Python function for correlation-aware decoding of
+      color-code quantum error correction data. Use the dev.npz data (dev_dets, dev_obs)
+      to calibrate a decoder that accounts for correlated errors in the DEM hyperedges.
+      The function must: (1) Parse the DEM text from setting["dem"]; (2) Build a weighted
+      matching graph where edge weights are calibrated using dev data statistics;
+      (3) Use PyMatching to decode with these calibrated weights; (4) Return a boolean
+      array of shape [n_shots, n_observables]. Test your logic conceptually but output
+      the COMPLETE function code. Use only stim, pymatching, numpy, scipy. Output
+      ONLY Python code, no explanations.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 8192
+    temperature: 0.3
+    device: null
+  worker2:
+    id: worker2
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: 'Generate a complete Python function for a reweighted MWPM decoder for
+      color codes that uses dev data for calibration. The published DEM is miscalibrated.
+      Your function must: (1) Read the DEM from setting["dem"]; (2) Analyze dev_dets
+      and dev_obs from setting to compute empirical error rates per detector; (3)
+      Re-weight the DEM hyperedges using these empirical rates; (4) Run PyMatching
+      on the reweighted DEM; (5) Return boolean predictions [n_shots, n_observables].
+      Include explicit dtype conversion to bool. Output ONLY the complete Python function
+      code. Use only stim, pymatching, numpy, scipy.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 8192
+    temperature: 0.25
+    device: null
+  worker3:
+    id: worker3
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:GLM-5.3-Flash
+    prompt: 'Generate a robust fallback decoder function for color codes that handles
+      edge cases and ensures correct output format. The function must: (1) Accept
+      setting dict and dets array; (2) If primary decoding fails, use a simple independent-observable
+      model (most probable observable per shot based on dev_obs statistics); (3) Ensure
+      output is boolean dtype with shape [n_shots, n_observables]; (4) Include timing
+      checks to stay under setting["meta"]["decode_budget_sec"]; (5) Validate that
+      no NaN or inf values appear. Output ONLY the complete Python function code.
+      Use only stim, pymatching, numpy, scipy.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 8192
+    temperature: 0.2
+    device: null
+  aggregator:
+    id: aggregator
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: openai:GLM-5.3-W4A8
+    prompt: 'Merge the decoder components from workers into a complete, working /app/methods/main/solver.py
+      file. The final decode(setting, dets) function must: (1) Try the best correlation-aware
+      decoder first; (2) Fall back to reweighted MWPM if that fails or times out;
+      (3) Use robust fallback as last resort; (4) ALWAYS return boolean array of shape
+      [n_shots, n_observables]; (5) Include timing to respect decode_budget_sec; (6)
+      Handle all four settings (d5, d5_Z, d7, d9) correctly. Write the COMPLETE solver.py
+      file. Verify: boolean dtype, correct shape, no imports beyond stim/pymatching/numpy/scipy.
+      Use subset_write_candidate to write the final file, then subset_preflight to
+      check it.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    - subset_write_candidate
+    - subset_preflight
+    - subset_public_python
+    max_tokens: 8192
+    temperature: 0.15
+    device: null
+topology:
+  reports_to:
+    worker1:
+    - aggregator
+    worker2:
+    - aggregator
+    worker3:
+    - aggregator
+execution:
+  parallel_workers: true
+  timeout: 600
+  max_retries: 0
+successful_tasks:
+- q: RSI-Exam qec_decoder_arena
+  notes: Best configuration on public cases; do not compare raw metrics across tasks

@@ -240,16 +240,21 @@ def main():
     for k in set(before['agents'])|set(after['agents']))]
   if before.get('topology')!=after.get('topology') or set(before['agents'])!=set(after['agents']):
    changed.append('topology')
-  needs_repair=(use_mutation and len(changed)!=1) or (
+  crossover_duplicate=(not use_mutation and any(
+   after==yaml.safe_load(configs[i]) for i in ranked[:2]))
+  needs_repair=(use_mutation and len(changed)!=1) or crossover_duplicate or (
    (a.output_dir/f'{label}.rejected_reason.txt').is_file())
   invalid_reason=None
   if needs_repair and not a.dry_run:
    reason=(a.output_dir/f'{label}.rejected_reason.txt')
-   explanation=reason.read_text()[:500] if reason.is_file() else f'Mutation changed {changed}, expected one component'
+   explanation=(reason.read_text()[:500] if reason.is_file() else
+    'Crossover returned an unchanged parent configuration' if crossover_duplicate else
+    f'Mutation changed {changed}, expected one component')
    if use_mutation and getattr(meta,'last_mutation_validation_error',None):
     explanation+='; parser detail: '+meta.last_mutation_validation_error[:500]
    repair_prompt=(feedback+'\nPrevious YAML draft was rejected before any MAS execution: '+explanation+
-                  '\nReturn one complete valid YAML changing exactly one component type.')
+                  ('\nReturn one complete valid YAML changing exactly one component type.' if use_mutation else
+                   '\nReturn one complete valid YAML that recombines and differs from both parents.'))
    try:
     if use_mutation: repaired=(meta.mutate_multi if a.mutation_mode=='multi' else meta.mutate)(configs[best],metrics[best],repair_prompt,model_list=MODELS)
     else:
@@ -264,6 +269,8 @@ def main():
     if repaired_before.get('topology')!=repaired_after.get('topology') or set(repaired_before['agents'])!=set(repaired_after['agents']):
      repaired_changed.append('topology')
     if use_mutation and len(repaired_changed)!=1:raise ValueError(f'Repair changed {repaired_changed}, expected one component')
+    if not use_mutation and any(repaired_after==yaml.safe_load(configs[i]) for i in ranked[:2]):
+     raise ValueError('Crossover repair returned an unchanged parent configuration')
     config=repaired;changed=repaired_changed
     (a.output_dir/f'{label}.repair_success.txt').write_text(explanation)
    except Exception as exc:

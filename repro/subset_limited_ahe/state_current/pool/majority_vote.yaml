@@ -1,0 +1,96 @@
+name: majority_vote_compact
+description: Three independent task-specific solver proposals and one synthesis agent
+backend: smolagents
+agents:
+  worker1:
+    id: worker1
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Independently design a complete solver for the CURRENT task. Focus on
+      broad exploration, budget allocation, and early anytime progress; state a testable
+      public hypothesis.
+    tools:
+    - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
+    - bbo_read_history
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
+    max_tokens: 4096
+    temperature: 0.65
+    device: null
+  worker2:
+    id: worker2
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Independently design a different complete solver for the CURRENT task.
+      Focus on feedback-driven local refinement, noisy observations, and final quality;
+      state a testable public hypothesis.
+    tools:
+    - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
+    - bbo_read_history
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  worker3:
+    id: worker3
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Independently design a robust complete solver for the CURRENT task. Focus
+      on interface correctness, execution budgets, fallback behavior, and likely failure
+      cases. Provide a concrete alternative, not only critique.
+    tools:
+    - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
+    - bbo_read_history
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
+    max_tokens: 4096
+    temperature: 0.35
+    device: null
+  aggregator:
+    id: aggregator
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Compare all three independent proposals against the CURRENT official task
+      contract and public feedback. Choose or combine justified parts. Return one
+      complete self-contained solver.py; verify interface and budgets.
+    tools:
+    - bbo_read_context
+    - bbo_read_public_data
+    - bbo_read_prior_feedback
+    - bbo_read_prior_trace
+    - bbo_read_history
+    - bbo_write_candidate
+    - bbo_preflight_candidate
+    - bbo_probe_candidate
+    max_tokens: 4096
+    temperature: 0.2
+    device: null
+topology:
+  reports_to:
+    worker1:
+    - aggregator
+    worker2:
+    - aggregator
+    worker3:
+    - aggregator
+execution:
+  parallel_workers: true
+  timeout: 600
+  max_retries: 0

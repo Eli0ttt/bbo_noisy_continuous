@@ -1,0 +1,196 @@
+name: croto_workbench_email
+description: DAG-unrolled CROTO (multi-phase teams with hierarchical aggregation) for WorkBench tasks
+backend: smolagents
+agents:
+  team1_p1:
+    id: team1_p1
+    role: team_worker
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: team_worker
+    tools: &id002
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.2
+    device: null
+    metadata: &id003
+      team_id: 1
+  team2_p1:
+    id: team2_p1
+    role: team_worker
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: team_worker
+    tools: &id004
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.2
+    device: null
+    metadata: &id005
+      team_id: 2
+  team3_p1:
+    id: team3_p1
+    role: team_worker
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: team_worker
+    tools: &id006
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.4
+    device: null
+    metadata: &id007
+      team_id: 3
+  team4_p1:
+    id: team4_p1
+    role: team_worker
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: team_worker
+    tools: &id008
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.4
+    device: null
+    metadata: &id009
+      team_id: 4
+  agg_p1_r1_g1:
+    id: agg_p1_r1_g1
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0
+    prompt: aggregator_croto
+    tools: &id001
+    - workbench_email
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  agg_p1_r1_g2:
+    id: agg_p1_r1_g2
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0
+    prompt: aggregator_croto
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  agg_p1_r2_g1:
+    id: agg_p1_r2_g1
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0
+    prompt: aggregator_croto
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  team1_p2:
+    id: team1_p2
+    role: team_worker
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: team_worker
+    tools: *id002
+    max_tokens: 8192
+    temperature: 0.2
+    device: null
+    metadata: *id003
+  team2_p2:
+    id: team2_p2
+    role: team_worker
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: team_worker
+    tools: *id004
+    max_tokens: 8192
+    temperature: 0.2
+    device: null
+    metadata: *id005
+  team3_p2:
+    id: team3_p2
+    role: team_worker
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: team_worker
+    tools: *id006
+    max_tokens: 8192
+    temperature: 0.4
+    device: null
+    metadata: *id007
+  team4_p2:
+    id: team4_p2
+    role: team_worker
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: team_worker
+    tools: *id008
+    max_tokens: 8192
+    temperature: 0.4
+    device: null
+    metadata: *id009
+  agg_p2_r1_g1:
+    id: agg_p2_r1_g1
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0
+    prompt: aggregator_croto
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  agg_p2_r1_g2:
+    id: agg_p2_r1_g2
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0
+    prompt: aggregator_croto
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  agg_p2_r2_g1:
+    id: agg_p2_r2_g1
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0
+    prompt: aggregator_croto
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+topology:
+  reports_to:
+    team1_p1:
+    - agg_p1_r1_g1
+    team2_p1:
+    - agg_p1_r1_g1
+    team3_p1:
+    - agg_p1_r1_g2
+    team4_p1:
+    - agg_p1_r1_g2
+    agg_p1_r1_g1:
+    - agg_p1_r2_g1
+    agg_p1_r1_g2:
+    - agg_p1_r2_g1
+    agg_p1_r2_g1:
+    - team1_p2
+    - team2_p2
+    - team3_p2
+    - team4_p2
+    team1_p2:
+    - agg_p2_r1_g1
+    team2_p2:
+    - agg_p2_r1_g1
+    team3_p2:
+    - agg_p2_r1_g2
+    team4_p2:
+    - agg_p2_r1_g2
+    agg_p2_r1_g1:
+    - agg_p2_r2_g1
+    agg_p2_r1_g2:
+    - agg_p2_r2_g1
+execution:
+  parallel_workers: true
+  timeout: 900
+  max_retries: 0

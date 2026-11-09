@@ -1,0 +1,69 @@
+name: chatdev_swebench
+description: ChatDev-style chat chain pipeline (CEO → CTO → Programmer → Reviewer → Tester) for SWE-bench tasks
+backend: smolagents
+agents:
+  # Phase 1 - Design: CEO defines requirements
+  ceo:
+    id: ceo
+    role: ceo
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: chatdev_ceo
+    tools: []
+    max_tokens: 4096
+    temperature: 0.3
+    device: null
+  # Phase 1 - Design: CTO creates technical plan
+  cto:
+    id: cto
+    role: cto
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: chatdev_cto
+    tools: []
+    max_tokens: 4096
+    temperature: 0.3
+    device: null
+  # Phase 2 - Coding: Programmer implements the fix (swe-agent for repo interaction)
+  programmer:
+    id: programmer
+    role: programmer
+    agent_type: SWEAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: worker
+    tools: []
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  # Phase 3 - Testing: Reviewer performs static code review
+  reviewer:
+    id: reviewer
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: chatdev_reviewer
+    tools: []
+    max_tokens: 4096
+    temperature: 0.3
+    device: null
+  # Phase 3 - Testing: Tester performs dynamic testing validation
+  tester:
+    id: tester
+    role: tester
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: chatdev_tester
+    tools: []
+    max_tokens: 4096
+    temperature: 0.3
+    device: null
+topology:
+  reports_to:
+    ceo: [cto]
+    cto: [programmer]
+    programmer: [reviewer]
+    reviewer: [tester]
+execution:
+  parallel_workers: false
+  timeout: 900
+  max_retries: 0

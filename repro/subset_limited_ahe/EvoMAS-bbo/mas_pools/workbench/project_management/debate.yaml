@@ -1,0 +1,297 @@
+name: debate_workbench_project_management
+description: DAG-unrolled debate system with 6 CodeAgents for WorkBench tasks
+backend: smolagents
+agents:
+  d1_r1:
+    id: d1_r1
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_initial
+    tools: &id001
+    - workbench_project_management
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d2_r1:
+    id: d2_r1
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_initial
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d3_r1:
+    id: d3_r1
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_initial
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d4_r1:
+    id: d4_r1
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_initial
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d5_r1:
+    id: d5_r1
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_initial
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d6_r1:
+    id: d6_r1
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_initial
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d1_r2:
+    id: d1_r2
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d2_r2:
+    id: d2_r2
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d3_r2:
+    id: d3_r2
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d4_r2:
+    id: d4_r2
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d5_r2:
+    id: d5_r2
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d6_r2:
+    id: d6_r2
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d1_r3:
+    id: d1_r3
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d2_r3:
+    id: d2_r3
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d3_r3:
+    id: d3_r3
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d4_r3:
+    id: d4_r3
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d5_r3:
+    id: d5_r3
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  d6_r3:
+    id: d6_r3
+    role: debater
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    prompt: debater_round
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+  moderator:
+    id: moderator
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0
+    prompt: aggregator
+    tools: *id001
+    max_tokens: 8192
+    temperature: 0.7
+    device: null
+topology:
+  reports_to:
+    d1_r1:
+    - d1_r2
+    - d2_r2
+    - d3_r2
+    - d4_r2
+    - d5_r2
+    - d6_r2
+    d2_r1:
+    - d1_r2
+    - d2_r2
+    - d3_r2
+    - d4_r2
+    - d5_r2
+    - d6_r2
+    d3_r1:
+    - d1_r2
+    - d2_r2
+    - d3_r2
+    - d4_r2
+    - d5_r2
+    - d6_r2
+    d4_r1:
+    - d1_r2
+    - d2_r2
+    - d3_r2
+    - d4_r2
+    - d5_r2
+    - d6_r2
+    d5_r1:
+    - d1_r2
+    - d2_r2
+    - d3_r2
+    - d4_r2
+    - d5_r2
+    - d6_r2
+    d6_r1:
+    - d1_r2
+    - d2_r2
+    - d3_r2
+    - d4_r2
+    - d5_r2
+    - d6_r2
+    d1_r2:
+    - d1_r3
+    - d2_r3
+    - d3_r3
+    - d4_r3
+    - d5_r3
+    - d6_r3
+    d2_r2:
+    - d1_r3
+    - d2_r3
+    - d3_r3
+    - d4_r3
+    - d5_r3
+    - d6_r3
+    d3_r2:
+    - d1_r3
+    - d2_r3
+    - d3_r3
+    - d4_r3
+    - d5_r3
+    - d6_r3
+    d4_r2:
+    - d1_r3
+    - d2_r3
+    - d3_r3
+    - d4_r3
+    - d5_r3
+    - d6_r3
+    d5_r2:
+    - d1_r3
+    - d2_r3
+    - d3_r3
+    - d4_r3
+    - d5_r3
+    - d6_r3
+    d6_r2:
+    - d1_r3
+    - d2_r3
+    - d3_r3
+    - d4_r3
+    - d5_r3
+    - d6_r3
+    d1_r3:
+    - moderator
+    d2_r3:
+    - moderator
+    d3_r3:
+    - moderator
+    d4_r3:
+    - moderator
+    d5_r3:
+    - moderator
+    d6_r3:
+    - moderator
+execution:
+  parallel_workers: true
+  timeout: 900
+  max_retries: 0

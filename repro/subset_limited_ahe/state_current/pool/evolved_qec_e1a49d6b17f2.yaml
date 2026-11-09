@@ -1,0 +1,88 @@
+name: evolved_qec_e1a49d6b17f2
+description: Public-score best MAS from RSI-Exam qec_decoder_arena; use for this task
+  only
+backend: smolagents
+agents:
+  worker1:
+    id: worker1
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Investigate correlation-aware decoding using the public DEM and labeled
+      development data; test a concrete hypothesis. Use only imports and public assets
+      allowed by the current official task.
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 4096
+    temperature: 0.65
+    device: null
+  worker2:
+    id: worker2
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Investigate dev-calibrated weights or color-pair decoding; avoid memorizing
+      public evaluation labels. Use only imports and public assets allowed by the
+      current official task.
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  worker3:
+    id: worker3
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Audit decode output shape and boolean dtype for d5, d5_Z, d7, d9 and per-setting
+      runtime. Use only imports and public assets allowed by the current official
+      task.
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 4096
+    temperature: 0.35
+    device: null
+  aggregator:
+    id: aggregator
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: 'Produce one complete decode(setting,dets) returning a boolean [n_shots,n_observables]
+      array for every setting. Synthesize worker outputs with robust validation: (1)
+      Ensure boolean dtype and correct shape for all settings including d7 and d9
+      where workers may struggle; (2) Implement majority voting when workers disagree;
+      (3) Include fallback logic using correlation-aware decoding if primary method
+      fails; (4) Verify output consistency across all four public settings before
+      final submission. Use only imports and public assets allowed by the current
+      official task.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    - subset_write_candidate
+    - subset_preflight
+    - subset_public_python
+    max_tokens: 4096
+    temperature: 0.2
+    device: null
+topology:
+  reports_to:
+    worker1:
+    - aggregator
+    worker2:
+    - aggregator
+    worker3:
+    - aggregator
+execution:
+  parallel_workers: true
+  timeout: 600
+  max_retries: 0
+successful_tasks:
+- q: RSI-Exam qec_decoder_arena
+  notes: Best configuration on public cases; do not compare raw metrics across tasks

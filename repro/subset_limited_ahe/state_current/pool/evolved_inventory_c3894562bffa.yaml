@@ -1,0 +1,148 @@
+name: evolved_inventory_c3894562bffa
+description: Public-score best MAS from RSI-Exam bbo_simopt_inventory; use for this
+  task only
+backend: smolagents
+agents:
+  proc_l1_1:
+    id: proc_l1_1
+    role: processor
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: For the CURRENT task (48-query stochastic inventory policy optimization
+      over [0,1]^4), propose a complete solver emphasizing Gaussian Process regression
+      or Bayesian optimization with a compact surrogate. Prioritize query efficiency,
+      handle noisy cost feedback, and use only NumPy. Ground design in the official
+      interface and public observations.
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 4096
+    temperature: 0.6
+    device: null
+  proc_l1_2:
+    id: proc_l1_2
+    role: processor
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: For the CURRENT task (48-query stochastic inventory policy optimization
+      over [0,1]^4), propose a distinct complete solver emphasizing adaptive random
+      search, differential evolution, or CMA-ES with noise handling. Use only NumPy.
+      Keep per-query computation bounded and vectorized. Ground design in the official
+      interface and public observations.
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  judge_l1:
+    id: judge_l1
+    role: judge
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Compare the two task-specific proposals using the official interface and
+      public feedback. Select the direction most likely to achieve strong cost reduction
+      within 48 queries on [0,1]^4 with noisy feedback. Name its strongest failure
+      risk (e.g., boundary violation, query inefficiency, numerical instability) for
+      the next layer.
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 2048
+    temperature: 0.15
+    device: null
+  proc_l2_1:
+    id: proc_l2_1
+    role: processor
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Fix the selected direction's most critical numerical instability or boundary
+      violation issue. The solver must guarantee [0,1]^4 bounds via clipping or projection,
+      maintain positive-definite covariance matrices if using GP surrogates, and avoid
+      NaN/inf gradients. Return a complete self-contained solver using only NumPy
+      that corrects the identified weakness while preserving query efficiency.
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 6144
+    temperature: 0.4
+    device: null
+  proc_l2_2:
+    id: proc_l2_2
+    role: processor
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Design a more sample-efficient alternative to the selected direction that
+      uses fewer than 48 queries for convergence. Focus on noise-robust acquisition
+      functions (e.g., expected improvement with noise), adaptive restart strategies,
+      or variance-reduced gradient estimates. The solver must handle stochastic cost
+      feedback and respect [0,1]^4 bounds. Return a complete self-contained solver
+      using only NumPy.
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 6144
+    temperature: 0.3
+    device: null
+  judge_l2:
+    id: judge_l2
+    role: judge
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Compare the two revised complete solvers against public evidence and official
+      constraints. Select the stronger candidate for 48-query stochastic inventory
+      optimization. Document residual risks (boundary, noise, runtime, query count).
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 2048
+    temperature: 0.15
+    device: null
+  aggregator:
+    id: aggregator
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: Using the selected revision, return one complete self-contained solver.py
+      for the CURRENT task (48-query stochastic inventory optimization). Preserve
+      only NumPy and stdlib imports. Verify interface compliance (Optimizer class,
+      ask/tell, [0,1]^4 bounds, finite outputs, 48-query budget, vectorized operations).
+      Ensure no network access or external dependencies.
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    - subset_write_candidate
+    - subset_preflight
+    - subset_public_python
+    max_tokens: 4096
+    temperature: 0.15
+    device: null
+topology:
+  reports_to:
+    proc_l1_1:
+    - judge_l1
+    proc_l1_2:
+    - judge_l1
+    judge_l1:
+    - proc_l2_1
+    - proc_l2_2
+    proc_l2_1:
+    - judge_l2
+    proc_l2_2:
+    - judge_l2
+    judge_l2:
+    - aggregator
+execution:
+  parallel_workers: true
+  timeout: 900
+  max_retries: 1
+successful_tasks:
+- q: RSI-Exam bbo_simopt_inventory
+  notes: Best configuration on public cases; do not compare raw metrics across tasks

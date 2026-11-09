@@ -1,0 +1,91 @@
+{
+  "schema": "evomas-rsi-task-memory-v1",
+  "runs": [
+    {
+      "task": "inventory",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/inventory_original_seed63_20261107T162819Z_1582904",
+      "config_sha256": "3b64543d47975a97ca0375bb70ccb9e1893f23c573edb14fb91a12e28f6f05c8",
+      "public_winner_sha256": "4dc9fb10f52b215d0b1c852fe59265191a53c98613a63498c5a509a9abe16712",
+      "hidden_score": 0.24717476214112694
+    },
+    {
+      "task": "bbo",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/bbo_original_seed63_20261107T162907Z_1584763",
+      "config_sha256": "8a9166b0900e695400a25259793f0fb5b4032bfa919512cb301bbbbde707abc7",
+      "public_winner_sha256": "836299ccfd5eb1caa5baf76c2c8cd655c0784ffcea2e5477de408c6574987441",
+      "hidden_score": 0.17837947439244134,
+      "hidden_status": "completed"
+    },
+    {
+      "task": "qec",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/qec_original_seed63_20261107T185100Z_1869919",
+      "config_sha256": "e1a49d6b17f2c877814813063e38860e15c44bab872ed3e5d5bb10326390128d",
+      "public_winner_sha256": "e3548c75644a9f913a0d4baa8b8ce6345a651a049e2e981615bffdd618608b48",
+      "hidden_score": 0.009082
+    },
+    {
+      "task": "graph",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/graph_original_seed63_20261107T192914Z_1948354",
+      "config_sha256": "f6b8fc9fd05cef8414f9185ef1a927cf6efdd59d189d8dbf2406fc1400bd3bec",
+      "public_winner_sha256": "d07b8d05257b492c49efaf457087368ea9f12d2765cbe0fc94e5269c7e16a97c",
+      "hidden_score": 0.086735
+    },
+    {
+      "task": "graph",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/graph_original_seed64_20261108T032631Z_2895839",
+      "config_sha256": "4d0c9fdbfe3d2247fa9372e19ff9f94ac6002dcc78068a833609c67985c3af70",
+      "public_winner_sha256": "c71b97ac10a5fdb872299afe412f915256bc9fbdc0bf53415803acf80e1a50f0",
+      "hidden_score": 0.020408
+    },
+    {
+      "task": "bbo",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/bbo_original_seed64_20261108T032556Z_2894364",
+      "config_sha256": "a10aaee5e69c53dd3150638958adaf8163539d4d94648708c7ba9dc47805fcf0",
+      "public_winner_sha256": "79e4bea1624b312fb13dcadc49f5d87df4ad501cfb0a6f812ec2b1a66f0cfd3a",
+      "hidden_score": 0.21082564895820197
+    },
+    {
+      "task": "inventory",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/inventory_original_seed64_20261108T052559Z_3145480",
+      "config_sha256": "c3894562bffa29f840bf0879a7dbffe69f5cc7b7e0c5cb6892292d5c63790122",
+      "public_winner_sha256": "038e4f1fd555b74fbf7e4f2dc86c19b11d30c50dbea245b5b71643e60a7aa17e",
+      "hidden_score": 0.25622378342350693
+    },
+    {
+      "task": "qec",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/qec_original_seed64_20261108T052832Z_3252696",
+      "config_sha256": "3edd1ff39077dd91d39463f6d2f4c0c044fbe1f502308959c29f3da588087a43",
+      "public_winner_sha256": "7e6f0599685bdfa1008eb2c9b4d169409c949c863a7d0876c361c694e27e8976",
+      "hidden_score": 0.0066
+    },
+    {
+      "task": "qec",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/qec_original_seed65_20261108T164839Z_724798",
+      "config_sha256": "46819577fd0053c501baf0181a389934d5244dc6f14f847baff46f7500d4f0cd",
+      "public_winner_sha256": "dbcc2795c6ecde4ebfab0935b24e99281a3a071ef345b67c4fc0f3366ab1c900",
+      "hidden_score": 0.0
+    },
+    {
+      "task": "bbo",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/bbo_original_seed65_20261108T165045Z_730765",
+      "config_sha256": "d5b90d52cff8216be2bbff992be93cdeb48bd97da8708fd9132b9f71a00c5808",
+      "public_winner_sha256": "3595d8293e53851206abd3807fc7f2c51e9847c937375e1a9c0dcd6632f604ca",
+      "hidden_score": 0.12575988307866076
+    },
+    {
+      "task": "graph",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/graph_original_seed65_20261108T185809Z_1088349",
+      "config_sha256": "0c0deed2f4ac0908aaaf76db52c5a04ca82b853db1d9a38dc15bdfedde6763dd",
+      "public_winner_sha256": "8b7d94ef728af028d1f81829bc82bd363ea630bc355507453a2b4fb0746085a9",
+      "hidden_score": 0.061224
+    },
+    {
+      "task": "inventory",
+      "run": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/outputs/inventory_original_seed65_20261108T184035Z_953399",
+      "config_sha256": "8a18fc4d8a34228301ef93d3b4bfad733c8a5a0a2817e9c47fcee14ff098f0f3",
+      "public_winner_sha256": "0b7bf284661b86b95e3b4f06924e3ad7f78e66e66387c5b718ef6c7f2549a76a",
+      "hidden_score": 0.29960609688183776
+    }
+  ],
+  "initial_seed_pool": "/data/user/wenxinyi/experiments/bbo_noisy_continuous/repro/subset_limited_ahe/seeds"
+}

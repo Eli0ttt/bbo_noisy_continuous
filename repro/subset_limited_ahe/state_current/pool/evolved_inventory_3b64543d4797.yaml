@@ -1,0 +1,107 @@
+name: evolved_inventory_3b64543d4797
+description: Public-score best MAS from RSI-Exam bbo_simopt_inventory; use for this
+  task only
+backend: smolagents
+agents:
+  worker1:
+    id: worker1
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:GLM-5.3-W4A8
+    prompt: 'Design a query-efficient stochastic inventory policy optimizer for the
+      CURRENT task. The problem: minimize operating cost over [0,1]^4 normalized controls
+      (reorder level, order-up-to level, expedite threshold, smoothing) with only
+      48 queries. You inherit a uniform-random starter. Focus on: (1) broad exploration
+      early to identify promising regions, (2) budget allocation that ensures progress
+      within 48 queries, (3) handling noisy objective feedback from the ask/tell interface,
+      (4) vectorized operations to avoid expensive per-query refits. State a testable
+      public hypothesis about which optimization approach best suits this low-dimensional
+      but noisy setting.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 8192
+    temperature: 0.5
+    device: null
+  worker2:
+    id: worker2
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: 'Design a different query-efficient stochastic inventory policy optimizer
+      for the CURRENT task. The problem: minimize operating cost over [0,1]^4 normalized
+      controls with only 48 queries and noisy feedback. Focus on: (1) feedback-driven
+      local refinement that adapts to noisy observations, (2) achieving early anytime
+      progress to secure partial-work credit, (3) maintaining final solution quality
+      despite limited budget, (4) using the self.batch mechanism for efficient evaluation.
+      Propose a concrete alternative approach (e.g., Bayesian optimization, evolutionary
+      strategy, or trust-region method). State a testable public hypothesis.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 8192
+    temperature: 0.5
+    device: null
+  worker3:
+    id: worker3
+    role: worker
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: 'Design a robust query-efficient stochastic inventory policy optimizer
+      for the CURRENT task. The problem: minimize operating cost over [0,1]^4 normalized
+      controls with 48 queries. Critical constraints: (1) Optimizer class with ask(n)/tell(X,y)
+      interface, (2) ask(n) returns finite matrix with 1..n rows, dim columns, all
+      in bounds, (3) no network access, only Python stdlib + NumPy 2.2.6, (4) aggregate
+      runtime timeout - keep each ask/tell bounded and vectorized, (5) extra returned
+      points don''t increase budget, (6) self.batch attribute for preferred batch
+      size. Focus on interface correctness, execution budgets, fallback behavior,
+      and likely failure cases. Provide a concrete alternative with robust error handling.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    max_tokens: 8192
+    temperature: 0.3
+    device: null
+  aggregator:
+    id: aggregator
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: openai:deepseek-v4-flash-s2
+    prompt: 'Compare all three independent optimizer proposals against the CURRENT
+      official task contract and public feedback. The task: stochastic inventory policy
+      search over [0,1]^4 with 48 queries, noisy feedback, and strict interface requirements.
+      Choose or combine justified parts from the proposals. Ensure the final solver.py:
+      (1) defines an Optimizer class with correct constructor (dim, lower, upper,
+      budget, seed, rng), (2) implements ask(n) returning in-bounds matrix, (3) implements
+      tell(X,y) with cost feedback, (4) supports self.batch attribute, (5) uses only
+      Python stdlib + NumPy 2.2.6, (6) is vectorized to avoid expensive refits per
+      query, (7) handles the 48-query budget efficiently. Verify interface and budgets
+      using available tools. Return one complete self-contained solver.py.'
+    tools:
+    - subset_read_context
+    - subset_read_public
+    - subset_read_history
+    - subset_write_candidate
+    - subset_preflight
+    - subset_public_python
+    max_tokens: 8192
+    temperature: 0.15
+    device: null
+topology:
+  reports_to:
+    worker1:
+    - aggregator
+    worker2:
+    - aggregator
+    worker3:
+    - aggregator
+execution:
+  parallel_workers: true
+  timeout: 600
+  max_retries: 0
+successful_tasks:
+- q: RSI-Exam bbo_simopt_inventory
+  notes: Best configuration on public cases; do not compare raw metrics across tasks
