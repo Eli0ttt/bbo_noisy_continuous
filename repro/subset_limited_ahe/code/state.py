@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse,asyncio,hashlib,json,os,re,shutil,sys,tempfile
 from pathlib import Path
 import yaml
+from skill_memory import add_run, render
 
 TASKS={'bbo':'bbo_noisy_continuous','inventory':'bbo_simopt_inventory',
        'graph':'johnson1991_leighton_graph_coloring','qec':'qec_decoder_arena'}
@@ -69,8 +70,7 @@ def adapt(text,task,source_task=None):
    tools=[tool for tool in tools if tool not in ('subset_write_candidate','subset_preflight')]
   a['tools']=tools
   if task=='bbo' and 'bbo_read_history' not in tools:a['tools'].append('bbo_read_history')
-  if a.get('model_id') not in ('openai:deepseek-v4-flash-s1','openai:deepseek-v4-flash-s2',
-                                'openai:GLM-5.3-W4A8','openai:GLM-5.3-Flash'):
+  if a.get('model_id') not in ('openai:deepseek-v4-flash-s1','openai:deepseek-v4-flash-s2'):
    a['model_id']='openai:deepseek-v4-flash-s1'
  c.pop('meta',None)
  return yaml.safe_dump(c,sort_keys=False,allow_unicode=True)
@@ -82,6 +82,8 @@ def initialize(root,state):
  for name in ('majority_vote.yaml','smoa.yaml'):
   shutil.copyfile(seeds/name,state/'pool'/name)
  atom(state/'memory.json',[])
+ atom(state/'skills.json',[])
+ atom(state/'role_memory.json',[])
  atom(state/'manifest.json',{'schema':'evomas-rsi-task-memory-v1','runs':[],
                               'initial_seed_pool':str(seeds.resolve())})
 
@@ -102,6 +104,13 @@ def export(state,task,dest):
  experience_fields=('query','action','config_changes','old_accuracy',
                     'new_accuracy','success','analysis')
  atom(dest/'memory.json',[{key:item[key] for key in experience_fields} for item in memory])
+ skills_path=state/'skills.json'
+ roles_path=state/'role_memory.json'
+ skills=json.loads(skills_path.read_text()) if skills_path.is_file() else []
+ roles=json.loads(roles_path.read_text()) if roles_path.is_file() else []
+ atom(dest/'skills.json',skills)
+ atom(dest/'role_memory.json',[x for x in roles if x.get('task')==task])
+ (dest/'skills_context.txt').write_text(render(skills)+'\n',encoding='utf8')
  atom(dest/'manifest.json',{'schema':manifest['schema'],
   'runs':[{'task':x['task'],'config_sha256':x['config_sha256']} for x in manifest['runs']]})
  atom(dest/'provenance.json',{'state':str(state.resolve()),'task':task,
@@ -260,6 +269,13 @@ def commit(root,state,run):
     'public_image_id':s.get('public_image_id'),
     'instruction_sha256':s.get('instruction_sha256'),
     'analysis':analysis})
+  from skill_memory import add_run
+  skills_path,roles_path=state/'skills.json',state/'role_memory.json'
+  skills=json.loads(skills_path.read_text()) if skills_path.is_file() else []
+  roles=json.loads(roles_path.read_text()) if roles_path.is_file() else []
+  skills,roles=add_run(skills,roles,task,run)
+  atom(skills_path,skills)
+  atom(roles_path,roles)
   atom(state/'memory.json',memory)
   manifest['runs'].append({'task':task,'run':str(run.resolve()),'config_sha256':digest,
                            'public_winner_sha256':s['best_visible']['sha256'],
@@ -271,7 +287,7 @@ def operations_of(s):return s.get('operations',[])
 
 def main():
  p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True)
- for cmd in ('init','export','commit','merge','replay','reconcile'):
+ for cmd in ('init','export','commit','merge','replay','reconcile','rebuild-knowledge'):
   sp=sub.add_parser(cmd);sp.add_argument('--root',type=Path,required=True);sp.add_argument('--state',type=Path,required=True)
   if cmd=='export':sp.add_argument('--task',choices=TASKS,required=True);sp.add_argument('--dest',type=Path,required=True)
   if cmd in ('commit','reconcile'):sp.add_argument('--run',type=Path,required=True)
@@ -283,6 +299,19 @@ def main():
  if a.command=='init':initialize(root,state)
  elif a.command=='export':export(state,a.task,a.dest)
  elif a.command=='commit':commit(root,state,a.run.resolve())
+ elif a.command=='rebuild-knowledge':
+  import fcntl
+  with (state/'lock').open('a') as lock:
+   fcntl.flock(lock,fcntl.LOCK_EX)
+   manifest=json.loads((state/'manifest.json').read_text())
+   skills,roles=[],[]
+   for item in manifest['runs']:
+    run=Path(item['run'])
+    if run.is_dir():skills,roles=add_run(skills,roles,item['task'],run)
+   atom(state/'skills.json',skills)
+   atom(state/'role_memory.json',roles)
+   print(json.dumps({'runs':len(manifest['runs']),'skills':len(skills),
+                     'role_notes':len(roles)},ensure_ascii=False))
  elif a.command=='reconcile':
   import fcntl
   run=a.run.resolve();task,s=summary_of(run)

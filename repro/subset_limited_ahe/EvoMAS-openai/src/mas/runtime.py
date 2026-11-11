@@ -3,6 +3,12 @@ Runtime for executing MAS.
 """
 
 import logging
+import os
+import fcntl
+import hashlib
+import time
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -16,6 +22,42 @@ from src.agents.runners.base import BaseAgentRunner
 # from src.agents.runners.sweagent import SWEAgentRunner
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _model_slot(model_id):
+    """Bound calls across threads AND separate task processes on this host.
+
+    Kernel locks release automatically if a worker crashes. The lock directory
+    contains only scheduling metadata and never task assets or solver outputs.
+    """
+    cap = max(1, int(os.environ.get("EVOMAS_PER_MODEL_CONCURRENCY", "2")))
+    root = Path(os.environ.get("EVOMAS_MODEL_LOCK_DIR", "/tmp/evomas_model_slots"))
+    root.mkdir(parents=True, exist_ok=True)
+    prefix = hashlib.sha256(model_id.encode()).hexdigest()[:20]
+    started_waiting = time.monotonic()
+    slot = None
+    while slot is None:
+        for index in range(cap):
+            candidate = open(root / f"{prefix}.{index}.lock", "a")
+            try:
+                fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                candidate.close()
+                continue
+            slot = candidate
+            break
+        if slot is None:
+            time.sleep(0.05)
+    waited = time.monotonic() - started_waiting
+    if os.environ.get("EVOMAS_LOG_MODEL_WAIT") == "1":
+        logger.info("MODEL_SLOT_WAIT model=%s seconds=%.3f cap=%d",
+                    model_id, waited, cap)
+    try:
+        yield
+    finally:
+        fcntl.flock(slot, fcntl.LOCK_UN)
+        slot.close()
 
 
 def _get_runner_class(backend: str):
@@ -193,18 +235,31 @@ class MasRuntime:
             task: Task to execute
             context: Execution context
         """
+        # Bound simultaneous calls to each model while allowing different
+        # model IDs to progress independently. Downstream report order follows
+        # topology, not network completion order.
+        def call(agent_spec, runner):
+            with _model_slot(agent_spec.model_id):
+                return runner.run(agent_spec, task, context.model_dump())
         with ThreadPoolExecutor(max_workers=len(agent_ids)) as executor:
             futures = {}
             for agent_id in agent_ids:
                 agent_spec = self.mas_spec.agents[agent_id]
                 runner = self._get_runner_for_agent(agent_spec)
-                future = executor.submit(runner.run, agent_spec, task, context.model_dump())
+                future = executor.submit(call, agent_spec, runner)
                 futures[future] = agent_id
-
+            completed = {}
             for future in as_completed(futures):
                 agent_id = futures[future]
                 try:
-                    result = future.result()
+                    completed[agent_id] = future.result()
+                except Exception as e:
+                    completed[agent_id] = e
+            for agent_id in agent_ids:
+                try:
+                    result = completed[agent_id]
+                    if isinstance(result, Exception):
+                        raise result
                     if not result.success:
                         raise RuntimeError(f"Agent {agent_id} failed: {result.error}")
                     context.add_report(agent_id, result.content, metadata=result.metadata)

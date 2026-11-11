@@ -9,8 +9,7 @@ from pathlib import Path
 import yaml
 from subset_visible import static_gate
 
-MODELS={'openai:deepseek-v4-flash-s1','openai:deepseek-v4-flash-s2',
-        'openai:GLM-5.3-W4A8','openai:GLM-5.3-Flash'}
+MODELS={'openai:deepseek-v4-flash-s1','openai:deepseek-v4-flash-s2'}
 TOOLS={'subset_read_context','subset_read_public','subset_read_history',
        'subset_write_candidate','subset_preflight','subset_public_python'}
 
@@ -57,9 +56,9 @@ def extract(source,task):
  raise ValueError('No complete candidate for this task in terminal report')
 
 def role_hint(agent,task):
- output={'inventory':'NumPy 2.2.6 has no np.erf or np.math; use math.erf from the standard library or a validated approximation. Run preflight and public selfcheck. Treat space-filling probes and a regime-diverse initial policy portfolio as hypotheses; compare independent progress across the four public regimes; target robust per-case improvements within 48 queries. Optimizer with __init__(dim, lower, upper, budget, seed, rng), ask(n), tell(X,y,metadata=None), 4D [0,1]^4, 48 noisy costs; stdlib + NumPy 2.2.6 only, self-contained solver.py.',
+ output={'inventory':'NumPy 2.2.6 has no np.erf or np.math; math.erf accepts only a scalar, not a NumPy array. For a vector of expected-improvement z values use a validated vectorized approximation or an explicit scalar loop. Check ask(n) with an array input in the public selfcheck. Run preflight and public selfcheck. Treat space-filling probes and a regime-diverse initial policy portfolio as hypotheses; compare independent progress across the four public regimes; target robust per-case improvements within 48 queries. Optimizer with __init__(dim, lower, upper, budget, seed, rng), ask(n), tell(X,y,metadata=None), 4D [0,1]^4, 48 noisy costs; stdlib + NumPy 2.2.6 only, self-contained solver.py.',
          'graph':'Consider incremental neighbor-color counts, adaptive tabu/ILS and robust restarts; verify them on the public graphs. Always return n_vertices color entries for EVERY graph; a fallback must be a valid coloring even when a search/helper times out or returns an empty list. Use monotonic per-instance timing; finish each graph in at most 35s including setup and formatting to avoid the 45s kill. solve(data) returning {"colorings": [[int,...], ...]}; fixed target_k, fewer monochromatic edges, each graph <45 seconds; stdlib + NumPy, optional official gc_lib.',
-         'qec':'Investigate correlation-aware decoding or color-pair schemes using labeled development data as testable hypotheses, without memorizing public labels. Check all four visible settings, including d7 and d9; preserve shape and per-setting budget. decode(setting,dets) returning a boolean [n_shots,n_observables] array; per-setting decode limit 600/900s; stdlib + NumPy + SciPy + Stim + PyMatching only; dev labels allowed, eval truth withheld.'}[task]
+         'qec':'Investigate correlation-aware decoding or color-pair schemes using labeled development data as testable hypotheses, without memorizing public labels. Check all four visible settings, including d7 and d9; preserve shape and per-setting budget. A prior candidate crashed on Stim DemInstruction.args_copy used as a list; it is a method, so call args_copy() and test the actual result. Treat a failure in any one setting as a failed candidate to repair. decode(setting,dets) returning a boolean [n_shots,n_observables] array; per-setting decode limit 600/900s; stdlib + NumPy + SciPy + Stim + PyMatching only; dev labels allowed, eval truth withheld.'}[task]
  prompt=agent.prompt if agent.prompt not in ('worker','smoa_aggregator','aggregator','judge','team_worker','processor','debater_initial','debater_round','reviewer_create','reviewer_review','reviewer_revise') else ''
  role=getattr(agent,'role','worker')
  if role=='judge':
@@ -89,7 +88,8 @@ def role_hint(agent,task):
          'do not use a solver from a previous task or previous run. '
          + ('Evolved prompt guidance: '+prompt if prompt else ''))
 
-def execute(config_path,task_root,task,output_dir,history,dry_run=False):
+def execute(config_path,task_root,task,output_dir,history,dry_run=False,
+            role_notes=None,shared_skills=''):
  from src.agents.spec import AgentResult
  from src.mas import runtime as runtime_mod
  from src.agents.runners.smolagents import SmolagentsRunner
@@ -109,7 +109,8 @@ def execute(config_path,task_root,task,output_dir,history,dry_run=False):
          'The starter below is the current task baseline, not a preceding task output.\n'
          f'```python\n{starter}\n```\n'
          'All earlier candidate results listed next are from THIS session only:\n'
-         +json.dumps([{k:v for k,v in h.items() if k!='source'} for h in history],ensure_ascii=False)[-16000:])
+         +json.dumps([{k:v for k,v in h.items() if k!='source'} for h in history],ensure_ascii=False)[-16000:]
+         +'\nShared conditional research procedures (public only):\n'+shared_skills[:2500])
  failures=[]
  class RoleRunner:
   def __init__(self):
@@ -122,7 +123,11 @@ def execute(config_path,task_root,task,output_dir,history,dry_run=False):
    if dry_run:
     content=('```python\n'+starter+'\n```') if agent.id==terminal else f'Mock report by {agent.id}'
     result=AgentResult(agent_id=agent.id,content=content,success=True)
-   else:result=self.delegate.run(agent,role_hint(agent,task)+'\n'+text,context)
+   else:
+    from skill_memory import role_context
+    note=role_context(role_notes or [],agent.id)
+    result=self.delegate.run(agent,role_hint(agent,task)+'\n'
+                             +'Task-local notes for this agent (unverified):\n'+note+'\n'+text,context)
    (output_dir/f'agent_{agent.id}.json').write_text(json.dumps({
     'content':result.content,'success':result.success,'error':result.error,
     'metadata':result.metadata},ensure_ascii=False,default=str))

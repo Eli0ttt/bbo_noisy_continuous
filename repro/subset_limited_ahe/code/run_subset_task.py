@@ -17,10 +17,11 @@ import time
 from pathlib import Path
 import yaml
 from subset_visible import NAMES, evaluate, static_gate
+from skill_memory import render
 
-MODELS=['openai:deepseek-v4-flash-s1','openai:deepseek-v4-flash-s2',
-        'openai:GLM-5.3-W4A8','openai:GLM-5.3-Flash']
-from trajectory_evidence import (mutation_component, crossover_change, append as append_evidence,
+MODELS=['openai:'+name.strip() for name in os.environ.get('MODEL_POOL',
+        'deepseek-v4-flash-s1,deepseek-v4-flash-s2').split(',')]
+from trajectory_evidence import (mutation_component, crossover_change, crossover_hybrid, append as append_evidence,
     context as evidence_context, public_rank)
 TOOLS=['subset_read_context','subset_read_public','subset_read_history',
        'subset_write_candidate','subset_preflight','subset_public_python']
@@ -108,6 +109,10 @@ def main():
  from src.meta_model.pool import ConfigurationPool,add_to_pool_if_better
  from src.tools.subset_generation import CATALOG_TEXT
  from subset_runtime import validate_yaml,execute
+ snapshot=a.seed_pool.parent
+ skills=json.loads((snapshot/'skills.json').read_text()) if (snapshot/'skills.json').is_file() else []
+ role_notes=json.loads((snapshot/'role_memory.json').read_text()) if (snapshot/'role_memory.json').is_file() else []
+ shared_skills=render(skills)
  os.environ['EVOMAS_ALLOWED_MODELS']=' '.join(MODELS)
  initial_names=[];rejected=[]
  for path in sorted(a.seed_pool.glob('*.yaml')):
@@ -147,13 +152,22 @@ def main():
    def update_memory(self,**kw):pass
   meta=Fake()
  else:
-  meta=MetaModel(model_id=MODELS[0],memory_path=str(a.output_dir/'memory.json'),
+  meta=MetaModel(model_id='openai:'+os.environ.get('META_MODEL','deepseek-v4-flash-s1'),memory_path=str(a.output_dir/'memory.json'),
                  memory_evolution=True)
-  meta.bbo_tool_policy=CATALOG_TEXT+'\nFor this task, keep only tools from this catalog.'
+  meta.bbo_tool_policy=(CATALOG_TEXT+'\nFor this task, keep only tools from this catalog. '
+   'Only the single terminal agent (no outgoing reports_to edges) may receive '
+   'subset_write_candidate, subset_preflight, or subset_public_python. '
+   'Other agents must return proposals in their reports. Preserve one terminal agent. '
+   'A prompt or model_id mutation must preserve every tool assignment, topology, '
+   'agent ID, and every unrelated YAML field exactly. Do not repeat an edit that '
+   'already regressed or failed without new public evidence for a distinct mechanism.')
   meta.mutation_decision_path=a.output_dir/'mutation_rationales.jsonl'
   meta.multi_trace_path=a.output_dir/'multi_trace.jsonl'
  task_query=f'RSI-Exam {NAMES[a.task]}: '+(a.task_root/'instruction.md').read_text()[:250]
  task_description=(a.task_root/'instruction.md').read_text()[:9000]
+ task_description+='\n\nCross-task conditional research procedures (public-only):\n'+shared_skills[:3000]
+ if not a.dry_run:
+  meta.bbo_tool_policy+='\nCross-task conditional research procedures:\n'+shared_skills[:2500]
  def valid_or_parent(proposed,parent,label):
   try:validate_yaml(proposed);return proposed
   except Exception as exc:
@@ -180,7 +194,7 @@ def main():
    if invalid_reason is not None:
     raise ValueError('MAS configuration rejected before execution: '+invalid_reason)
    runtime=execute(a.output_dir/'evaluations'/f'{label}.yaml',a.task_root,a.task,
-                   version,history,dry_run=a.dry_run)
+                   version,history,dry_run=a.dry_run,role_notes=role_notes,shared_skills=shared_skills)
    solver=version/'candidate_solver.py'
    if not a.dry_run:
     try:static_gate(a.task,solver.read_text(encoding='utf8'))
@@ -191,12 +205,41 @@ def main():
       'error':f'Correct this candidate before public selfcheck: {type(gate_error).__name__}: {gate_error}',
       'source':failed_source[:100000]}]
      runtime=execute(a.output_dir/'evaluations'/f'{label}.yaml',a.task_root,a.task,
-                     version,repair_history,dry_run=False)
+                     version,repair_history,dry_run=False,role_notes=role_notes,shared_skills=shared_skills)
      solver=version/'candidate_solver.py'
      static_gate(a.task,solver.read_text(encoding='utf8'))
      (version/'syntax_repair_success.txt').write_text(str(gate_error)[:500])
-   result=({'valid':True,'metric':0.01,'raw_conflicts':100} if a.dry_run else
-           evaluate(a.task,a.task_root,solver))
+   try:
+    result=({'valid':True,'metric':0.01,'raw_conflicts':100} if a.dry_run else
+            evaluate(a.task,a.task_root,solver))
+   except (ValueError,subprocess.TimeoutExpired) as check_error:
+    result={'valid':False,'error_type':type(check_error).__name__,
+            'error':str(check_error)[-1600:]}
+   if not a.dry_run and not result.get('valid'):
+    # A public failure is diagnostic evidence. Give the same candidate slot
+    # one bounded repair attempt; never consume another evolution version.
+    first_result=result
+    first_source=solver.read_text(encoding='utf8')
+    (version/'public_repair_initial.json').write_text(json.dumps(first_result,ensure_ascii=False,default=str))
+    (version/'public_repair_initial.py').write_text(first_source,encoding='utf8')
+    repair_history=history+[{'label':label+'_public_repair','metric':first_result.get('metric'),
+      'valid':False,'error':'Public selfcheck failed: '+json.dumps(first_result,ensure_ascii=False,default=str)[-2400:]
+      +'. Repair this task solver contract; keep official budgets and interfaces.',
+      'source':first_source[:100000]}]
+    try:
+     repaired_runtime=execute(a.output_dir/'evaluations'/f'{label}.yaml',a.task_root,a.task,
+       version,repair_history,dry_run=False,role_notes=role_notes,shared_skills=shared_skills)
+     repaired_source=solver.read_text(encoding='utf8')
+     static_gate(a.task,repaired_source)
+     repaired_result=evaluate(a.task,a.task_root,solver)
+     if not repaired_result.get('valid'):
+      raise ValueError('Public repair remained invalid: '+str(repaired_result.get('error'))[:400])
+     runtime=repaired_runtime;result=repaired_result
+     (version/'public_repair_success.txt').write_text('Same-slot public repair passed')
+    except Exception as repair_error:
+     (version/'public_repair_failure.txt').write_text(str(repair_error)[-800:])
+     solver.write_text(first_source,encoding='utf8')
+     result=first_result
   except Exception as exc:
    (version/'candidate_solver.py').write_text('# Invalid candidate: see failure.json\n') if not (version/'candidate_solver.py').exists() else None
    result={'valid':False,'error_type':type(exc).__name__,'error':str(exc)[-1600:]}
@@ -250,6 +293,7 @@ def main():
   elif a.task=='graph':
    current_public_summary['per_graph_tail']=str(current_public.get('stdout_tail') or '')[-1400:]
   feedback=json.dumps({'observations':evidence,'prior_decisions':concise,
+        'cross_task_skills':shared_skills[:2600],
         'normalized_diagnoses':evidence_context(a.output_dir),
         'current_parent_label':candidates[best]['label'],
         'current_parent_public':current_public_summary,
@@ -308,9 +352,27 @@ def main():
     config=repaired;changed=repaired_changed
     (a.output_dir/f'{label}.repair_success.txt').write_text(explanation)
    except Exception as exc:
-    reason.write_text(explanation+'\nRepair failed: '+str(exc)[:500])
-    invalid_reason=reason.read_text()[:1000]
-    config=configs[best];changed=[]
+    hybrid=None
+    if not use_mutation:
+     try:
+      hybrid=crossover_hybrid(configs[ranked[0]],configs[ranked[1]])
+      if hybrid is not None:
+       validate_yaml(hybrid)
+       if any(not crossover_change(configs[i],hybrid) for i in ranked[:2]):
+        raise ValueError('Hybrid did not change both parents')
+       config=hybrid
+       changed=['prompt']
+       reason.unlink(missing_ok=True)
+       (a.output_dir/f'{label}.hybrid_fallback.txt').write_text(
+        'Both model crossover drafts failed; combined distinct prompts from both '
+        'parents under the better public parent topology.\n'+explanation)
+     except Exception as hybrid_error:
+      exc=ValueError(str(exc)[:300]+'; hybrid fallback: '+str(hybrid_error)[:300])
+      hybrid=None
+    if hybrid is None:
+     reason.write_text(explanation+'\nRepair failed: '+str(exc)[:500])
+     invalid_reason=reason.read_text()[:1000]
+     config=configs[best];changed=[]
   elif use_mutation and scope_error is not None:
    (a.output_dir/f'{label}.rejected_reason.txt').write_text(
     f'Original mutation must change exactly one component; observed {changed}')

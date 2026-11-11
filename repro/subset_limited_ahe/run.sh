@@ -1,54 +1,48 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="$(cd "${1:?Usage: run.sh ROOT STATE TASK MODE SEED}" && pwd)"
-STATE="$(realpath "${2:?STATE}")"; TASK="${3:?TASK}"; MODE="${4:?MODE}"; SEED="${5:?SEED}"
-[[ "$TASK" =~ ^(bbo|inventory|graph|qec)$ ]] || exit 2
-[[ "$MODE" == original ]] || exit 2
-[[ "$SEED" =~ ^[0-9]+$ ]] || exit 2
-VERSIONS="${SUBSET_MAX_VERSIONS:-6}"
-[[ "$VERSIONS" == 4 || "$VERSIONS" == 6 ]] || { echo "SUBSET_MAX_VERSIONS must be 4 or 6" >&2; exit 2; }
-cd "$ROOT"
+ROOT="$(cd "${1:?Usage: run.sh ROOT STATE TASK original SEED}" && pwd)"
+STATE="$(realpath "${2:?STATE}")"
+TASK="${3:?TASK}"; MODE="${4:?MODE}"; SEED="${5:?SEED}"
+[[ "$TASK" =~ ^(bbo|inventory|graph|qec)$ && "$MODE" == original && "$SEED" =~ ^[0-9]+$ ]] || exit 2
 set -a
 source "$ROOT/env/dsh_bbo_experiment.env"
 set +a
-export OPENAI_API_KEY="${OPENAI_API_KEY:-${DEEPSEEK_API_KEY:-}}"
-export OPENAI_BASE_URL="${OPENAI_BASE_URL:-${DEEPSEEK_BASE_URL:-}}"
-test -n "$OPENAI_API_KEY"
-[[ "$OPENAI_BASE_URL" == 'http://183.230.173.202:36789/v1' ]] || exit 1
-FORK="$ROOT/repro/subset_limited_ahe"
-test -f "$STATE/manifest.json";test -x "$HOME/.local/share/uv/tools/harbor/bin/harbor"
+[[ "$BBO_ROOT" == "$ROOT" && "$OPENAI_BASE_URL" == 'http://183.230.173.202:36789/v1' ]] || exit 2
+[[ "$META_MODEL" == 'deepseek-v4-flash-s1' && "$MODEL_POOL" == 'deepseek-v4-flash-s1,deepseek-v4-flash-s2' ]] || exit 2
+[[ "$SUBSET_MAX_VERSIONS" == 6 && "$MUTATION_PROBABILITY" == 0.7 ]] || exit 2
+[[ -n "$OPENAI_API_KEY" && -f "$STATE/manifest.json" && -x "$HARBOR_BIN" ]] || exit 2
+FORK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$FORK/outputs/${TASK}_${MODE}_seed${SEED}_$(date -u +%Y%m%dT%H%M%SZ)_$$"
 INPUT="$OUT.input"
 python "$FORK/code/state.py" export --root "$ROOT" --state "$STATE" --task "$TASK" --dest "$INPUT"
 printf 'RUN_DIR=%s\nINPUT_SNAPSHOT=%s\n' "$OUT" "$INPUT"
-if [[ "$TASK" == bbo ]];then
-  CONTAINER="${BBO_EVAL_CONTAINER:-bbo-evomas-visible-wenxinyi}"
-  [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" == true ]]
+if [[ "$TASK" == bbo ]]; then
+  [[ "$(docker inspect -f '{{.State.Running}}' "$BBO_EVAL_CONTAINER")" == true ]]
   python "$FORK/task_preflight.py" bbo "$ROOT"
   PYTHONPATH="$FORK/adapter${PYTHONPATH:+:$PYTHONPATH}" \
     python "$FORK/adapter/evomas_bbo_pipeline.py" \
-    --evomas-root "$FORK/EvoMAS-bbo" --seed-pool "$INPUT/working_pool" \
-    --instruction "$ROOT/instruction.md" --output-dir "$OUT" --container "$CONTAINER" \
-    --meta-model deepseek-v4-flash-s1 --model-pool deepseek-v4-flash-s1,deepseek-v4-flash-s2,GLM-5.3-W4A8,GLM-5.3-Flash \
-    --num-parents 2 --max-solver-versions "$VERSIONS" --skip-final-repeat \
-    --mutation-probability 0.7 --mutation-mode "$MODE" --tool-mode bbo \
-    --seed "$SEED" --pool-warm-start \
-    --knowledge-scope cross-run --initial-memory "$INPUT/memory.json" \
-    --no-memory-evolution 2>&1 | tee "$OUT.log"
+      --evomas-root "$FORK/EvoMAS-bbo" --seed-pool "$INPUT/working_pool" \
+      --instruction "$ROOT/instruction.md" --output-dir "$OUT" --container "$BBO_EVAL_CONTAINER" \
+      --meta-model "$META_MODEL" --model-pool "$MODEL_POOL" \
+      --num-parents 2 --max-solver-versions "$SUBSET_MAX_VERSIONS" --skip-final-repeat \
+      --mutation-probability "$MUTATION_PROBABILITY" --mutation-mode "$MODE" --tool-mode bbo \
+      --seed "$SEED" --pool-warm-start --knowledge-scope cross-run \
+      --initial-memory "$INPUT/memory.json" --knowledge-snapshot "$INPUT" \
+      --no-memory-evolution 2>&1 | tee "$OUT.log"
 else
   case "$TASK" in
-   inventory) NAME=bbo_simopt_inventory;;
-   graph) NAME=johnson1991_leighton_graph_coloring;;
-   qec) NAME=qec_decoder_arena;;
+    inventory) NAME=bbo_simopt_inventory;;
+    graph) NAME=johnson1991_leighton_graph_coloring;;
+    qec) NAME=qec_decoder_arena;;
   esac
-  TASK_ROOT="$ROOT/rsi_exam_tasks/$NAME"
-  test -f "$TASK_ROOT/task.toml"
+  TASK_ROOT="$RSI_TASKS_ROOT/$NAME"
+  [[ -f "$TASK_ROOT/task.toml" ]] || exit 2
   docker image inspect "rsi-subset-$NAME:public" >/dev/null
   python "$FORK/code/run_subset_task.py" "$TASK" \
     --project-root "$ROOT" --task-root "$TASK_ROOT" --seed-pool "$INPUT/working_pool" \
     --initial-memory "$INPUT/memory.json" --output-dir "$OUT" \
-    --mutation-mode "$MODE" --seed "$SEED" --max-versions "$VERSIONS" \
-    --mutation-probability 0.7 2>&1 | tee "$OUT.log"
+    --mutation-mode "$MODE" --seed "$SEED" --max-versions "$SUBSET_MAX_VERSIONS" \
+    --mutation-probability "$MUTATION_PROBABILITY" 2>&1 | tee "$OUT.log"
 fi
 cp "$INPUT/provenance.json" "$OUT/input_provenance.json"
 python "$FORK/code/submit_hidden.py" --root "$ROOT" --run "$OUT" --task "$TASK" \

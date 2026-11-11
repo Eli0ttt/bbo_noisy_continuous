@@ -83,7 +83,8 @@ def evaluate(task,root,solver):
                 rows.append(json.loads(proc.stdout.strip().splitlines()[-1]))
             except (subprocess.TimeoutExpired,ValueError,IndexError,KeyError,json.JSONDecodeError) as exc:
                 rows.append({'setting':name,'score':0.0,'error':str(exc)[-1000:]})
-        return {'valid':True,'task':task,'metric':sum(x['score'] for x in rows)/len(rows),
+        return {'valid':len(rows)==4 and all(not x.get('error') for x in rows),
+                'task':task,'metric':sum(x['score'] for x in rows)/len(rows),
                 'metric_direction':'higher','settings':rows}
     proc=subprocess.run(command(task,root,solver,runner),capture_output=True,text=True,timeout=limit)
     if proc.returncode:

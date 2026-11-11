@@ -18,7 +18,7 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ADAPTER_DIR))
 
 sys.path.insert(0, str(ADAPTER_DIR.parent / "code"))
-from trajectory_evidence import (mutation_component, crossover_change, append as append_evidence,
+from trajectory_evidence import (mutation_component, crossover_change, crossover_hybrid, append as append_evidence,
     context as evidence_context, public_rank)
 
 from native_bbo_runtime import (CandidateExtractionError, MASExecutionFailure, canonical_model_id,
@@ -669,6 +669,8 @@ def main():
     parser.add_argument("--tool-mode", choices=("none", "bbo"), default="none")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--initial-memory", type=Path, help="Optional prior EvoMAS action memory JSON")
+    parser.add_argument("--knowledge-snapshot", type=Path,
+                        help="Frozen public-only skill and task-local role memory export")
     parser.add_argument("--continue-from-run", type=Path,
                         help="Carry only EvoMAS memory from a completed run; pool is chosen separately")
     parser.add_argument("--knowledge-scope", choices=("session", "cross-run"),
@@ -817,6 +819,16 @@ def main():
         "surrogate screening; do not forbid a family without a timed public test. "
         "These are hypotheses to evaluate with public selfcheck, not hardcoded output."
     )
+    shared_skills=''
+    if args.knowledge_snapshot:
+        from skill_memory import render
+        skill_file=args.knowledge_snapshot/'skills.json'
+        role_file=args.knowledge_snapshot/'role_memory.json'
+        shared_skills=render(json.loads(skill_file.read_text())) if skill_file.is_file() else ''
+        (args.output_dir/'skills_context.txt').write_text(shared_skills[:4800],encoding='utf8')
+        if role_file.is_file():
+            (args.output_dir/'role_memory.json').write_bytes(role_file.read_bytes())
+        task_description+='\nCross-task conditional research procedures (public-only):\n'+shared_skills[:3000]
     task_samples = [{"query": task_description}]
 
     memory_source = args.initial_memory
@@ -845,6 +857,7 @@ def main():
             "For the BBO no-tool baseline keep tools: [] on every agent."
             if args.tool_mode == "none" else CATALOG_TEXT
         )
+        meta_model.bbo_tool_policy += "\nShared conditional research procedures:\n"+shared_skills[:2500]
         meta_model.bbo_tool_policy += (
             "\nIf you mutate prompts, put substantive BBO-specific natural-language "
             "instructions directly in each changed YAML prompt field. Merely "
@@ -1146,12 +1159,28 @@ def main():
                 offspring = check_offspring(repaired)
                 (evaluation_dir / f"{label}.repair_success.txt").write_text(repair_note)
             except Exception as repair_error:
-                (evaluation_dir / f"{label}.fallback_reason.txt").write_text(
-                    str(first_error)[:500] + "\nRepair failed: " + str(repair_error)[:500])
-                invalid_reason = ("MAS configuration rejected before execution: "
-                                  + str(first_error)[:500] + "; repair: "
-                                  + str(repair_error)[:500])
-                offspring = validated_config(configs[old_index], args.tool_mode)
+                hybrid = None
+                if action == "crossover":
+                    try:
+                        hybrid = crossover_hybrid(configs[ranked[0]], configs[ranked[1]])
+                        if hybrid is not None:
+                            offspring = check_offspring(hybrid)
+                            (evaluation_dir / f"{label}.hybrid_fallback.txt").write_text(
+                                "Both model crossover drafts failed; combined distinct "
+                                "prompts from the two parents under the better public "
+                                "parent topology.\n" + repair_note)
+                    except Exception as hybrid_error:
+                        repair_error = ValueError(
+                            str(repair_error)[:300] + "; hybrid fallback: "
+                            + str(hybrid_error)[:300])
+                        hybrid = None
+                if hybrid is None:
+                    (evaluation_dir / f"{label}.fallback_reason.txt").write_text(
+                        str(first_error)[:500] + "\nRepair failed: " + str(repair_error)[:500])
+                    invalid_reason = ("MAS configuration rejected before execution: "
+                                      + str(first_error)[:500] + "; repair: "
+                                      + str(repair_error)[:500])
+                    offspring = validated_config(configs[old_index], args.tool_mode)
         if invalid_reason is not None:
             (evaluation_dir / f"{label}.yaml").write_text(offspring, encoding="utf-8")
             child_metrics = mark_interrupted_candidate(evaluation_dir, label, invalid_reason)

@@ -239,9 +239,9 @@ class BBOReadHistory(_BBOBase):
         self._record()
         compact = {k: v for k, v in entry.items() if k not in
                    ("agent_reports", "official_visible_selfcheck", "public_trace")}
-        compact["solver_source"] = str(compact.get("solver_source") or "")[:18000]
-        compact["agent_reports"] = entry.get("agent_reports", [])[:2]
-        return json.dumps(compact, ensure_ascii=False)[:24000]
+        compact["solver_source"] = str(compact.get("solver_source") or "")[:3500]
+        compact["agent_reports"] = []
+        return json.dumps(compact, ensure_ascii=False)[:5000]
 
 
 class BBOWriteCandidate(_BBOBase):

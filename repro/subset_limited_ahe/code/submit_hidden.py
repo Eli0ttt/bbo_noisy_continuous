@@ -50,7 +50,7 @@ def main():
  cmd=[str(a.harbor_bin),'run','--yes','--env','docker','--job-name',name,
       '--jobs-dir',str(jobs),'--n-concurrent','1','--n-attempts','1','--max-retries','0',
       '--path',str(task_root),'--agent','dsh_rsi_agent.evo_submission_agent:EvoSubmissionAgent',
-      '--model','deepseek-v4-flash-s1','--mounts',mounts,
+      '--model',os.environ.get('META_MODEL','deepseek-v4-flash-s1'),'--mounts',mounts,
       '--agent-kwarg','solver_sha256='+digest]
  env=os.environ.copy();env['PYTHONPATH']=str(root)+os.pathsep+env.get('PYTHONPATH','')
  s['hidden_status']='running';s['hidden_job']=str(job);summary.write_text(json.dumps(s,indent=2,ensure_ascii=False)+'\n')

@@ -328,6 +328,9 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
     task += ("\n\n## Official shipped starting solver (uniform random search)\n"
              "Start this run from this task baseline; prior runs' generated solver "
              "source is not inherited.\n```python\n" + starter + "\n```\n")
+    shared=output_dir.parent/'skills_context.txt'
+    if shared.is_file():
+        task+='\n\nShared conditional research procedures (public only):\n'+shared.read_text()[:2500]
     if feedback:
         if hashlib.sha256(feedback["solver_source"].encode()).hexdigest() != feedback["source_sha256"]:
             raise ValueError("research feedback source hash mismatch")
@@ -374,8 +377,16 @@ def execute(config_path: Path, instruction_path: Path, output_dir: Path, dry_run
                      + feedback["solver_source"] + "\n```\n"
                      + guidance + "Do not merely describe a patch.\n"
                      if feedback and agent.id == terminal_agent else "")
+            role_note=''
+            notes_path=output_dir.parent/'role_memory.json'
+            if notes_path.is_file():
+                notes=json.loads(notes_path.read_text())
+                matching=[x for x in notes if x.get('agent_id')==agent.id][-2:]
+                role_note='\n'.join(
+                    f"Task-local unverified note ({x.get('label')}): "
+                    f"{x.get('research_note_unverified','')}" for x in matching)[:900]
             result = self.delegate.run(
-                agent, agent_instruction(agent) + "\n\n" + text + prior, context
+                agent, agent_instruction(agent) + "\n\n" + role_note + text + prior, context
             )
             (output_dir / f"agent_{agent.id}.json").write_text(
                 json.dumps({

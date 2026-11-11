@@ -1,0 +1,222 @@
+name: peer_review_swebench
+description: DAG-unrolled peer review (create→review→revise→aggregate) for SWE-bench tasks
+backend: smolagents
+agents:
+  # Stage 1: Create - DefaultAgent (swe-agent for repo interaction)
+  creator1:
+    id: creator1
+    role: creator
+    agent_type: SWEAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_create
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  creator2:
+    id: creator2
+    role: creator
+    agent_type: SWEAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_create
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  creator3:
+    id: creator3
+    role: creator
+    agent_type: SWEAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_create
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  creator4:
+    id: creator4
+    role: creator
+    agent_type: SWEAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_create
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  creator5:
+    id: creator5
+    role: creator
+    agent_type: SWEAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_create
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  creator6:
+    id: creator6
+    role: creator
+    agent_type: SWEAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_create
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  # Stage 2: Review - CodeAgent (needs custom review prompt, sweagent is prompt-fixed)
+  reviewer1:
+    id: reviewer1
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_review
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  reviewer2:
+    id: reviewer2
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_review
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  reviewer3:
+    id: reviewer3
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_review
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  reviewer4:
+    id: reviewer4
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_review
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  reviewer5:
+    id: reviewer5
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_review
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  reviewer6:
+    id: reviewer6
+    role: reviewer
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_review
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  # Stage 3: Revise - CodeAgent (needs custom revise prompt)
+  reviser1:
+    id: reviser1
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_revise
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  reviser2:
+    id: reviser2
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_revise
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  reviser3:
+    id: reviser3
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_revise
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  reviser4:
+    id: reviser4
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_revise
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  reviser5:
+    id: reviser5
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_revise
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  reviser6:
+    id: reviser6
+    role: reviser
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: reviewer_revise
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+  # Stage 4: Aggregate - CodeAgent
+  aggregator:
+    id: aggregator
+    role: aggregator
+    agent_type: CodeAgent
+    model_id: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    prompt: aggregator
+    tools: []
+    max_tokens: 4096
+    temperature: 0.7
+    device: null
+topology:
+  reports_to:
+    creator1: [reviewer1, reviewer2, reviewer3, reviewer4, reviewer5, reviewer6]
+    creator2: [reviewer1, reviewer2, reviewer3, reviewer4, reviewer5, reviewer6]
+    creator3: [reviewer1, reviewer2, reviewer3, reviewer4, reviewer5, reviewer6]
+    creator4: [reviewer1, reviewer2, reviewer3, reviewer4, reviewer5, reviewer6]
+    creator5: [reviewer1, reviewer2, reviewer3, reviewer4, reviewer5, reviewer6]
+    creator6: [reviewer1, reviewer2, reviewer3, reviewer4, reviewer5, reviewer6]
+    reviewer1: [reviser1, reviser2, reviser3, reviser4, reviser5, reviser6]
+    reviewer2: [reviser1, reviser2, reviser3, reviser4, reviser5, reviser6]
+    reviewer3: [reviser1, reviser2, reviser3, reviser4, reviser5, reviser6]
+    reviewer4: [reviser1, reviser2, reviser3, reviser4, reviser5, reviser6]
+    reviewer5: [reviser1, reviser2, reviser3, reviser4, reviser5, reviser6]
+    reviewer6: [reviser1, reviser2, reviser3, reviser4, reviser5, reviser6]
+    reviser1: [aggregator]
+    reviser2: [aggregator]
+    reviser3: [aggregator]
+    reviser4: [aggregator]
+    reviser5: [aggregator]
+    reviser6: [aggregator]
+execution:
+  parallel_workers: true
+  timeout: 900
+  max_retries: 0
